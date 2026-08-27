@@ -288,6 +288,10 @@ async def _paginate_full_list(list_method, items_attr: str, server_name: str,
         if cache_meta_out is not None and not items:
             for key, snake, camel in (("ttl_ms", "ttl_ms", "ttlMs"), ("cache_scope", "cache_scope", "cacheScope")):
                 hint = mcp_field(result, snake, camel)
+                # ttl_ms=0 is the mcp 2.x SDK default for "no hint", not a real TTL —
+                # record only positive TTLs (CHG-23; Valicen local patch, Talaria row 2).
+                if key == "ttl_ms" and not (isinstance(hint, (int, float)) and hint > 0):
+                    continue
                 if hint is not None:
                     cache_meta_out[key] = hint
         items.extend(getattr(result, items_attr, None) or [])

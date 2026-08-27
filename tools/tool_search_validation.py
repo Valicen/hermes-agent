@@ -169,10 +169,18 @@ def normalize_tool_call_entries(args: Dict[str, Any]) -> Tuple[List[Dict[str, An
         if raw_args is None:
             raw_args = {}
         if isinstance(raw_args, str):
-            try:
-                raw_args = json.loads(raw_args)
-            except json.JSONDecodeError as e:
-                return [], f"tool_call calls[{position}].arguments is not valid JSON: {e}"
+            # An empty/whitespace-only 'arguments' string means "no arguments": models emit ""
+            # for no-arg tools because the bridge schema marks 'arguments' REQUIRED, and
+            # json.loads("") turned a valid call into an unrepairable error the model retried
+            # until the iteration budget died (134 occurrences across 8 profiles 08-14..08-24).
+            # (Valicen local patch 2026-08-24, Talaria row 2.)
+            if not raw_args.strip():
+                raw_args = {}
+            else:
+                try:
+                    raw_args = json.loads(raw_args)
+                except json.JSONDecodeError as e:
+                    return [], f"tool_call calls[{position}].arguments is not valid JSON: {e}"
         if not isinstance(raw_args, dict):
             return [], f"tool_call calls[{position}].arguments must be an object"
         entries.append({"name": name, "arguments": raw_args})

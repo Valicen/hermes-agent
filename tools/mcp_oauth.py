@@ -474,6 +474,15 @@ class HermesTokenStorage:
 
     async def set_tokens(self, tokens: "OAuthToken") -> None:
         payload = _model_json(tokens)
+        # Preserve the stored refresh token when a rotation response omits one. RFC 6749
+        # permits refresh responses without a new refresh_token (Zoho's always do), so
+        # persisting the response verbatim silently discards the grant: the in-memory
+        # token keeps refreshing until the next process restart, after which the server
+        # demands full browser re-authorization every hour. (Valicen local patch, Talaria row 2.)
+        if "refresh_token" not in payload:
+            stored_refresh = (_read_json(self._tokens_path()) or {}).get("refresh_token")
+            if stored_refresh:
+                payload["refresh_token"] = stored_refresh
         # Absolute ``expires_at``: see _rebase_expires_in.
         if payload.get("expires_in") is not None:
             with contextlib.suppress(TypeError, ValueError):  # mock tokens / odd shapes: skip, don't fail persistence
