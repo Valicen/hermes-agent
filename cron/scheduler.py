@@ -64,6 +64,53 @@ def _close_late_session_db_result(future: "concurrent.futures.Future") -> None:
             from hermes_state_registry import release_or_close
             release_or_close(db)
 
+def _run_completion_event(
+    job: dict,
+    *,
+    output_file: str | Path,
+    success: bool,
+    final_response: str,
+    error: Optional[str],
+) -> Optional[str]:
+    """Run an optional, post-persistence completion event once per job fire.
+
+    Completion events are intentionally downstream of ``save_job_output``:
+    consumers receive a durable report path instead of racing an upstream
+    variable-duration job.  An event failure never changes the upstream job's
+    success state; it is retained on the execution record for operators.
+    """
+    event = job.get("completion_event")
+    if not isinstance(event, dict):
+        return None
+    script = str(event.get("script") or "").strip()
+    if not script:
+        return "completion_event is configured without a script"
+    candidate = Path(script).expanduser()
+    if not candidate.is_absolute():
+        candidate = _get_hermes_home() / "scripts" / candidate
+    if not candidate.is_file():
+        return f"completion event script not found: {candidate}"
+    command = [str(candidate)] if candidate.suffix in {".sh", ".bash"} else [sys.executable, str(candidate)]
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(_get_hermes_home())
+    env["HERMES_COMPLETION_JOB_ID"] = str(job.get("id") or "")
+    env["HERMES_COMPLETION_EXECUTION_ID"] = str(job.get("execution_id") or "")
+    env["HERMES_COMPLETION_OUTPUT_FILE"] = str(output_file)
+    env["HERMES_COMPLETION_SUCCESS"] = "true" if success else "false"
+    if error:
+        env["HERMES_COMPLETION_ERROR"] = str(error)
+    try:
+        completed = subprocess.run(
+            command, env=env, cwd=str(candidate.parent), capture_output=True,
+            text=True, timeout=max(30, int(event.get("timeout", 900))),
+        )
+    except Exception as exc:
+        return str(exc)
+    if completed.returncode == 0:
+        return None
+    detail = (completed.stderr or completed.stdout or "completion event failed").strip()
+    return detail[-2000:]
+
 
 def _set_cron_session_title(session_db, session_id, base_title):
     """Persist a non-blank, unique title for a finished cron session; returns it (None if unset).
@@ -2635,6 +2682,7 @@ class _RunDelivery:
     incident_acked: bool = False
     failure_incident_id: Optional[str] = None
     side_effect_ownership_lost: bool = False
+    completion_event_error: Optional[str] = None  # Talaria row 4
 
 
 def _save_compose_deliver(
@@ -2653,6 +2701,13 @@ def _save_compose_deliver(
             else save_job_output(job["id"], output))
     if verbose and output_file is not None:
         logger.info("Output saved to: %s", output_file)
+
+    # An optional completion event fires only after the report is durable: the event-driven
+    # handoff boundary for dependent role work (Argus/n8n notice pipelines). Event failure is
+    # recorded separately and never rewrites the run result. (Valicen local patch, Talaria row 4.)
+    d.completion_event_error = _run_completion_event(
+        job, output_file=output_file, success=d.success, final_response=final_response, error=d.error,
+    )
 
     # A shutdown-killed tool subprocess can leave a plausible final_response from truncated
     # output; force the honest "interrupted" failure path. Peek-only (consumed later).
@@ -2780,7 +2835,10 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         # Failure ping left the process (or had a configured target): mark the incident alerted.
         _mark_incident_alerted(d.failure_incident_id)
     finish_execution(
-        execution_id, success=d.success, error=d.error, delivery_outcome=delivery_outcome)
+        execution_id, success=d.success,
+        error=d.error or (f"Completion event failed: {d.completion_event_error}"
+                          if d.completion_event_error else None),
+        delivery_outcome=delivery_outcome)
     return True
 
 
