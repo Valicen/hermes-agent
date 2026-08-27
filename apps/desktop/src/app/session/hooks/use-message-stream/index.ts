@@ -565,7 +565,9 @@ export function useMessageStream({
       text: string,
       responsePreviewed?: boolean,
       failure?: { error: string; partial: boolean; surface?: ErrorSurface | null },
-      occurredAt = Date.now() / 1000
+      occurredAt = Date.now() / 1000,
+      // Model that actually served this turn, off the message.complete frame.
+      servedModel?: string
     ) => {
       let shouldHydrate = false
 
@@ -620,7 +622,8 @@ export function useMessageStream({
             pending: false,
             interim: false,
             ...(durationS !== undefined ? { durationS } : {}),
-            ...(completionError && failure?.surface ? { errorSurface: failure.surface } : {})
+            ...(completionError && failure?.surface ? { errorSurface: failure.surface } : {}),
+            ...(servedModel ? { servedModel } : {})
           }
 
           if (completionError && !keepFailedPartialText) {
@@ -645,6 +648,7 @@ export function useMessageStream({
           completedAt: occurredAt,
           branchGroupId: state.pendingBranchGroup ?? undefined,
           ...(durationS !== undefined ? { durationS } : {}),
+          ...(servedModel ? { servedModel } : {}),
           ...(completionError && { error: completionError }),
           ...(completionError && failure?.surface ? { errorSurface: failure.surface } : {})
         })

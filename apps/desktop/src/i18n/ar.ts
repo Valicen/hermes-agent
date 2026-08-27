@@ -2820,6 +2820,7 @@ export const ar = defineLocale({
       thoughtBriefly: 'فكّر قليلاً',
       thoughtFor: duration => `فكّر لمدة ${duration}`,
       turnDuration: duration => `استغرقت هذه الجولة ${duration}`,
+      turnModel: model => `تم تنفيذ هذه الجولة بواسطة ${model}`,
       today: time => `اليوم ${time}`,
       yesterday: time => `أمس ${time}`,
       copy: 'نسخ',

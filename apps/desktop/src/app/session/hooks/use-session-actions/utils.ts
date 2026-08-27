@@ -173,7 +173,10 @@ const COMPARED_FIELDS = [
   'completedAt',
   // Turn wall-clock duration — stamps the visible "⏱ 38s" badge, so a change
   // must re-render (set once at completion; stable afterwards).
-  'durationS'
+  'durationS',
+  // Model that served the turn — stamps a visible badge, so a change must
+  // re-render (set once at completion / hydration; stable afterwards).
+  'servedModel'
 ] as const
 
 const IGNORED_FIELDS = ['attachmentRefs', 'parts', 'rowId'] as const

@@ -64,6 +64,70 @@ describe('withUniqueToolCallIdsWithinMessage', () => {
 })
 
 describe('toChatMessages', () => {
+  it('hydrates the served model from display_metadata so it survives a reload', () => {
+    // openrouter/auto resolves to a different model on every API call, so the
+    // configured model is not the one that answered. The backend stamps the
+    // real one into display_metadata.served_model; unlike durationS it must
+    // still be there after the session is reopened.
+    const messages = toChatMessages([
+      { role: 'user', content: 'hi', timestamp: 1 },
+      {
+        role: 'assistant',
+        content: 'hello',
+        display_metadata: { served_model: 'z-ai/glm-5.2' } as unknown as SessionMessage['display_metadata'],
+        timestamp: 2
+      }
+    ])
+
+    expect(messages.at(-1)?.servedModel).toBe('z-ai/glm-5.2')
+  })
+
+  it('reads served_model from display_metadata served as raw JSON text', () => {
+    const messages = toChatMessages([
+      {
+        role: 'assistant',
+        content: 'hello',
+        display_metadata: '{"served_model":"z-ai/glm-5.2"}' as unknown as SessionMessage['display_metadata'],
+        timestamp: 1
+      }
+    ])
+
+    expect(messages.at(-1)?.servedModel).toBe('z-ai/glm-5.2')
+  })
+
+  it('leaves servedModel unset when the backend did not stamp one', () => {
+    const messages = toChatMessages([{ role: 'assistant', content: 'hello', timestamp: 1 }])
+
+    expect(messages.at(-1)?.servedModel).toBeUndefined()
+  })
+
+  it('takes the LAST served model when a tool turn merges into one bubble', () => {
+    // A tool-heavy turn is several API calls rendered as one bubble, and auto
+    // can route each call to a different model. The badge sits under the final
+    // reply, so it must name the model that produced it.
+    const messages = toChatMessages([
+      {
+        role: 'assistant',
+        content: '',
+        display_metadata: { served_model: 'first/model' } as unknown as SessionMessage['display_metadata'],
+        timestamp: 1,
+        tool_calls: [{ function: { arguments: '{}', name: 'bash' }, id: 'c1', type: 'function' }]
+      },
+      { role: 'tool', content: 'ok', timestamp: 2, tool_call_id: 'c1', tool_name: 'bash' },
+      {
+        role: 'assistant',
+        content: 'done',
+        display_metadata: { served_model: 'last/model' } as unknown as SessionMessage['display_metadata'],
+        timestamp: 3
+      }
+    ])
+
+    const assistant = messages.filter(m => m.role === 'assistant')
+
+    expect(assistant).toHaveLength(1)
+    expect(assistant[0]?.servedModel).toBe('last/model')
+  })
+
   it('rebuilds the full command from a gateway tool row carrying args', () => {
     // Gateway watch-window hydration projects tool rows as
     // {role:'tool', name, context, args?}. `context` is an 80-char preview;

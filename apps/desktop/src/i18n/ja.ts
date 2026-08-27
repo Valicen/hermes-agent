@@ -3280,6 +3280,7 @@ export const ja = defineLocale({
       thoughtBriefly: '少し思考',
       thoughtFor: duration => `${duration} 思考`,
       turnDuration: duration => `このターンの所要時間: ${duration}`,
+      turnModel: model => `このターンの実行モデル: ${model}`,
       today: time => `今日 ${time}`,
       yesterday: time => `昨日 ${time}`,
       copy: 'コピー',

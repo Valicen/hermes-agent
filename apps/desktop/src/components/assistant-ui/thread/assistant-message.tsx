@@ -232,6 +232,10 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
     [messageRuntime, responseIds, threadRuntime]
   )
 
+  // Model that actually served this turn. agent.model is only what was
+  // requested — openrouter/auto resolves to a different model per call.
+  const servedModel = useAuiState(s => s.message.metadata?.custom?.servedModel as string | undefined)
+
   // useEnterAnimation consults `enabled` ONLY when its callback ref fires,
   // i.e. at mount: the hook parks the value in a ref and returns a
   // useCallback([]) identity, and its own contract is "`enabled` is captured
@@ -301,6 +305,7 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
             <AssistantFooter
               durationS={turnDurationS}
               getMessageText={getMessageText}
+              servedModel={servedModel}
               messageId={messageId}
               onBranchInNewChat={onBranchInNewChat}
             />
@@ -946,9 +951,26 @@ const ReadAloudButton: FC<{ getText: () => string; messageId: string }> = ({ get
   )
 }
 
-const AssistantFooter: FC<MessageActionProps & { durationS?: number }> = ({ durationS, ...props }) => {
+const AssistantFooter: FC<MessageActionProps & { durationS?: number; servedModel?: string }> = ({
+  durationS,
+  servedModel,
+  ...props
+}) => {
+  const { t } = useI18n()
+
   return (
     <div className="flex min-h-6 flex-col items-end gap-1 pr-(--message-text-indent) pl-(--message-text-indent)">
+      {/* Duration is rendered by AssistantActionBar upstream now; only the
+          routed-model chip stays here. (Valicen local patch.) */}
+      {servedModel !== undefined && (
+        <span
+          className="select-none px-0.5 text-[0.6875rem] leading-5 text-muted-foreground"
+          data-slot="aui_turn-model"
+          title={t.assistant.thread.turnModel(servedModel)}
+        >
+          {servedModel}
+        </span>
+      )}
       <BranchPickerPrimitive.Root
         className="inline-flex h-6 items-center gap-1 text-xs text-muted-foreground"
         hideWhenSingleBranch

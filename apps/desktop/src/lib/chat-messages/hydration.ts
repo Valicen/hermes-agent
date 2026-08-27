@@ -199,6 +199,12 @@ function asyncResultBody(content: string): string | undefined {
   )
 }
 
+function servedModel(metadata: SessionMessage['display_metadata']): string | undefined {
+  const model = parseDisplayMetadata(metadata)?.served_model
+
+  return typeof model === 'string' && model.length > 0 ? model : undefined
+}
+
 function timelineDisplayContent(message: SessionMessage, content: string): string {
   if (message.display_kind === 'model_switch') {
     return 'model changed'
@@ -412,6 +418,15 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
           message.timestamp,
           ...parts.map(part => part.timestamp)
         )
+        // A tool-heavy turn merges several API calls into one bubble, and
+        // openrouter/auto can serve each of them from a different model.
+        // Last non-empty wins: that's the call that produced the reply the
+        // badge sits under.
+        const mergedModel = servedModel(message.display_metadata)
+
+        if (mergedModel) {
+          activeAssistant.servedModel = mergedModel
+        }
 
         return
       }
@@ -420,6 +435,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     }
 
     const reactions = messageReactions(message.display_metadata)
+    const rowServedModel = servedModel(message.display_metadata)
     // Gateway resume names the durable row id `row_id`; the REST transcript
     // prefetch ships the same messages.id as a numeric `id`. Either one lets
     // reactions address this exact row later.
@@ -436,6 +452,7 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       timestamp: earliestTimestamp(message.timestamp, ...parts.map(part => part.timestamp)),
       ...(rowId !== undefined ? { rowId } : {}),
       ...(reactions.length ? { reactions } : {}),
+      ...(rowServedModel !== undefined ? { servedModel: rowServedModel } : {}),
       ...(extractedAttachmentRefs ? { attachmentRefs: extractedAttachmentRefs } : {})
     })
 

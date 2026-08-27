@@ -41,6 +41,11 @@ export type ChatMessage = {
    *  stamped by the desktop when it watched the turn run. Absent for
    *  messages hydrated from history — the backend doesn't persist it. */
   durationS?: number
+  /** Model that actually served this turn, e.g. `z-ai/glm-5.2` when the
+   *  configured model is `openrouter/auto`. Live turns read it off the
+   *  `message.complete` frame; rehydrated turns off
+   *  `display_metadata.served_model`, so unlike durationS it survives a reload. */
+  servedModel?: string
   /** Composer attachment ref strings (`@file:...`, `@image:...`) sent with this user message. */
   attachmentRefs?: string[]
   /** Durable backend `messages.id`. Absent until the row is persisted. */

@@ -350,7 +350,14 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
           }
         : undefined
 
-    completeAssistantMessage(sessionId, finalText, payload?.response_previewed, failure, occurredAt)
+    completeAssistantMessage(
+      sessionId,
+      finalText,
+      payload?.response_previewed,
+      failure,
+      occurredAt,
+      typeof payload?.model === 'string' ? payload.model : undefined
+    )
 
     // Onboarding's first build: between turns is the only moment Setup may
     // put a check-in into that session (no-op everywhere else).
