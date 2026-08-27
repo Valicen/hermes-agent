@@ -1557,7 +1557,13 @@ def anthropic_prompt_cache_policy(
         return True, True
     # Envelope layout is OpenAI-wire only; Portal Claude on native Messages must fall through to the
     # anthropic_messages branch (inner-block markers) or it serves 0% cache hits.
-    if (is_openrouter or is_nous_portal) and (is_claude or is_kimi) and not is_anthropic_wire:
+    # openrouter/auto resolves to a served model only AFTER this policy runs, so the
+    # model-name checks above are blind to Claude serves (measured 2026-08-23: auto ->
+    # claude-opus-5, 165 requests, 0 cache reads, $61.52). Opt the auto alias into the
+    # envelope layout: Anthropic serves honour the markers, other providers tolerate
+    # them. (Valicen local patch, Talaria row 1.)
+    is_auto_router = is_openrouter and model_lower in ("openrouter/auto", "auto")
+    if (is_openrouter or is_nous_portal) and (is_claude or is_kimi or is_auto_router) and not is_anthropic_wire:
         return True, False
     # Nous Portal Qwen takes the envelope path too; the alibaba-family check below only matches
     # provider=opencode/alibaba and would leave Portal traffic uncached.

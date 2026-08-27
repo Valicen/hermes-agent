@@ -62,6 +62,81 @@ _PROVIDER_STREAM_ERROR_TEXT_LIMIT = 4096
 _FALLBACK_EXHAUSTED_COOLDOWN_S = 5.0
 
 
+# --- Reasoning-mandatory endpoint recovery (Valicen local patch) -----------
+# Some endpoints refuse to have thinking turned off and answer any disable
+# form with HTTP 400 "Reasoning is mandatory for this endpoint and cannot be
+# disabled."  With a router model (openrouter/auto) the served endpoint is not
+# known until the request is made, so the disable cannot be gated up front.
+# Strip the disable fields and retry once, then remember the route so the rest
+# of the process stops paying for the failed round trip.
+_REASONING_MANDATORY_ROUTES: set = set()
+
+
+def _is_reasoning_mandatory_error(exc: Exception) -> bool:
+    msg = str(getattr(exc, "message", "") or "") + " " + str(exc)
+    msg = msg.lower()
+    if "reasoning is mandatory" in msg:
+        return True
+    return ("cannot be disabled" in msg) and ("reasoning" in msg or "thinking" in msg)
+
+
+def _strip_reasoning_disable(kwargs: dict) -> bool:
+    """Remove every "turn thinking off" wire field, in place.
+
+    Returns True when something was actually removed (i.e. a retry is worth
+    making).  Covers the OpenRouter/Nous ``extra_body.reasoning``, Kimi
+    ``extra_body.thinking``, Gemini ``thinking_config`` and the top-level
+    ``reasoning_effort`` spellings.
+    """
+    changed = False
+    extra = kwargs.get("extra_body")
+    if isinstance(extra, dict):
+        reasoning = extra.get("reasoning")
+        if isinstance(reasoning, dict) and reasoning.get("enabled") is False:
+            extra.pop("reasoning", None)
+            changed = True
+        thinking = extra.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+            extra.pop("thinking", None)
+            changed = True
+        tcfg = extra.get("thinking_config")
+        if isinstance(tcfg, dict) and (
+            tcfg.get("thinkingBudget") == 0 or tcfg.get("thinking_budget") == 0
+        ):
+            extra.pop("thinking_config", None)
+            changed = True
+        if changed and not extra:
+            kwargs.pop("extra_body", None)
+    if str(kwargs.get("reasoning_effort", "")).strip().lower() in {
+        "none", "off", "false", "disabled",
+    }:
+        kwargs.pop("reasoning_effort", None)
+        changed = True
+    return changed
+
+
+def _create_with_reasoning_recovery(create_fn, kwargs: dict, base_url: str = ""):
+    route = (str(base_url or ""), str(kwargs.get("model") or ""))
+    if route in _REASONING_MANDATORY_ROUTES:
+        _strip_reasoning_disable(kwargs)
+    try:
+        return create_fn(**kwargs)
+    except Exception as exc:
+        if not _is_reasoning_mandatory_error(exc):
+            raise
+        if not _strip_reasoning_disable(kwargs):
+            raise
+        _REASONING_MANDATORY_ROUTES.add(route)
+        logger.warning(
+            "Endpoint requires reasoning (model=%s base_url=%s): retrying "
+            "without the thinking-disable fields. Thinking stays ON for this "
+            "route until the process restarts.",
+            route[1] or "unknown", route[0] or "unknown",
+        )
+        return create_fn(**kwargs)
+
+
+
 def _context_thread_target(callback):
     """Bind a no-argument thread target to the caller's ContextVars."""
     context = contextvars.copy_context()
@@ -734,13 +809,19 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
         _completions = getattr(getattr(agent.client, "chat", None), "completions", None)
         if not callable(getattr(_completions, "prepare", None)):
             api_kwargs.pop("_moa_prepared_request", None)
-        return agent.client.chat.completions.create(**api_kwargs)
+        return _create_with_reasoning_recovery(
+            agent.client.chat.completions.create, api_kwargs,
+            base_url=getattr(agent, "base_url", ""),
+        )
     request_client = make_client("chat_completion_request")
     # #93650: keep the bulk wire-format payload out of the SDK's GIL-holding
     # request transform. No-op unless this really is the OpenAI SDK, so the
     # MoA facade above and the suite's stand-in clients are unaffected.
     api_kwargs = bypass_chat_sdk_request_transform(api_kwargs, request_client)
-    return request_client.chat.completions.create(**api_kwargs)
+    return _create_with_reasoning_recovery(
+        request_client.chat.completions.create, api_kwargs,
+        base_url=getattr(agent, "base_url", ""),
+    )
 
 
 def should_use_direct_api_call(agent) -> bool:
@@ -1537,6 +1618,18 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     msg = stamp_message_timestamp({"role": "assistant",
         "content": _assistant_content_for_storage(agent, assistant_message), "reasoning": reasoning_text,
         "finish_reason": finish_reason})
+
+    # Stamp the model that actually served this turn into the existing
+    # per-message JSON column, so the transcript can still show it after a
+    # reload. Rides display_metadata (as message reactions do) rather than
+    # taking a new column, and merges instead of overwriting.
+    # (Valicen local patch - routed-model accounting.)
+    _served_model = str(getattr(agent, "_last_served_model", "") or "").strip()
+    if _served_model:
+        _existing_meta = msg.get("display_metadata")
+        _meta = dict(_existing_meta) if isinstance(_existing_meta, dict) else {}
+        _meta["served_model"] = _served_model
+        msg["display_metadata"] = _meta
 
     raw_reasoning_content = getattr(assistant_message, "reasoning_content", None)
     if raw_reasoning_content is None:
@@ -2739,7 +2832,10 @@ class _StreamingCall(StreamingWaitMonitor):
         # #93650: as above — the streaming path carries the same bulk
         # messages/tools payload and pays the same client-side walk.
         stream_kwargs = bypass_chat_sdk_request_transform(stream_kwargs, request_client)
-        return request_client.chat.completions.create(**stream_kwargs)
+        return _create_with_reasoning_recovery(
+            request_client.chat.completions.create, stream_kwargs,
+            base_url=getattr(self.agent, "base_url", ""),
+        )
 
     def _chat_stream_created(self, raw_stream: Any) -> None:
         response = self._attempt_stream_response = getattr(raw_stream, "response", None)

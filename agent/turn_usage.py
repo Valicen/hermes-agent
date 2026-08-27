@@ -83,6 +83,14 @@ def record_response_usage(
     # Token/cost accounting below stays gated on real usage, but the request itself
     # must remain observable.
     agent.session_api_calls += 1
+    # Remember which model actually SERVED this call. agent.model is only what was
+    # requested; openrouter/auto resolves to a different model per call. Stashed on
+    # the agent so build_assistant_message can stamp display_metadata.served_model
+    # and so pricing below uses the real rate. (Valicen local patch, Talaria row 1.)
+    agent._last_served_model = str(getattr(response, "model", "") or "").strip()
+    _routed_model = agent._last_served_model
+    _served_model = _routed_model or agent.model
+    _routed_note = f" routed={_routed_model}" if _routed_model and _routed_model != agent.model else ""
     if not (hasattr(response, 'usage') and response.usage):
         if getattr(compressor, "awaiting_real_usage_after_compression", False):
             # No usage -> cannot adjudicate the prior compaction; consume the
@@ -202,8 +210,8 @@ def record_response_usage(
     if isinstance(_upstream, str) and _upstream:
         _ident += f" upstream={_upstream}"
     logger.info(
-        "API call #%d: model=%s provider=%s in=%d out=%d total=%d latency=%.1fs%s%s",
-        agent.session_api_calls, agent.model, agent.provider or "unknown",
+        "API call #%d: model=%s%s provider=%s in=%d out=%d total=%d latency=%.1fs%s%s",
+        agent.session_api_calls, agent.model, _routed_note, agent.provider or "unknown",
         prompt_tokens, completion_tokens, total_tokens,
         api_duration, _cache_pct, _ident,
     )
@@ -215,7 +223,7 @@ def record_response_usage(
 
     # MoA: agent.model/provider are the virtual preset/"moa" with no pricing entry, silently
     # dropping aggregator spend. Price at the REAL model/provider from the aggregator slot.
-    _agg_cost_model, _agg_cost_provider, _agg_cost_base_url = agent.model, agent.provider, agent.base_url
+    _agg_cost_model, _agg_cost_provider, _agg_cost_base_url = _served_model, agent.provider, agent.base_url
     _agg_slot = getattr(_moa_client, "last_aggregator_slot", None) if _moa_client is not None else None
     if _agg_slot and _agg_slot.get("model"):
         _agg_cost_model = _agg_slot["model"]

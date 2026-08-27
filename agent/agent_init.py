@@ -1458,10 +1458,29 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
     # Opt-in idle compaction: compact up front when a session resumes after this many
     # seconds idle (0 = disabled). Consumed by build_turn_context().
     idle_compact_after_seconds = max(0, int(cfg.get("idle_compact_after_seconds", 0)))
+    enabled = _cfg_flag(cfg, "enabled", True)
+    # Local patch (2026-08-26, David / CHG-20260826-21, Talaria row 1): profiles disable
+    # auto-compaction to protect cloud prompt caches, but on a LOCAL endpoint (zeus
+    # llama.cpp) the window is small and fixed, so an overflow hard-stops the chat with
+    # "run /compress" instead of compacting. Local serving costs nothing per token and
+    # compaction only spends the cheap aux compression model — so auto-compact on local
+    # endpoints even when compression.enabled is false. Opt out per profile with
+    # compression.enable_for_local_endpoints: false.
+    if not enabled and _cfg_flag(cfg, "enable_for_local_endpoints", True):
+        with suppress(Exception):
+            from agent.model_metadata import is_local_endpoint as _cmp_is_local
+            if _cmp_is_local(getattr(agent, "base_url", "") or ""):
+                enabled = True
+                logger.info(
+                    "compression: auto-compaction enabled for local endpoint %s "
+                    "(compression.enabled is false; override via "
+                    "compression.enable_for_local_endpoints)",
+                    agent.base_url,
+                )
     return CompressionSettings(
         threshold=threshold,
         autoraise_notice_enabled=autoraise_notice_enabled,
-        enabled=_cfg_flag(cfg, "enabled", True),
+        enabled=enabled,
         target_ratio=target_ratio,
         protect_last=protect_last,
         # "lean" keeps a clamped 2.5%/10K-25K verbatim tail (continuity rides the summary);
