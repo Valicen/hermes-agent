@@ -693,6 +693,12 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     if _is_bot_mode_session(session):
         raw = _bot_mode_delivery_text(raw, successful=status == "complete")
     payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+    # Which model actually served this turn: openrouter/auto resolves per call, so the
+    # session-level configured model is not the truth here. Argus/desktop served-model
+    # display. (Valicen local patch, Talaria row 6.)
+    _served_model = str(getattr(agent, "_last_served_model", "") or "").strip()
+    if _served_model:
+        payload["model"] = _served_model
     if last_reasoning:
         payload["reasoning"] = last_reasoning
     if status_note:
