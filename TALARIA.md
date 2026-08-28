@@ -41,3 +41,13 @@ mechanical.
 
 Sync history: see `~/argus/ops/logs/talaria-sync.log` and the
 `talaria-pre-sync-*` tags (rollback points).
+
+## Commit identity for upstream PRs
+
+Upstream's `Contributor Attribution Check` fails any PR whose commits carry an
+email with no mapping in `contributors/emails/`. Earlier commits on this branch
+were authored `david@devon.localdomain` (git had no identity set on devon);
+PRs #97407/#97408/#97409 carry a mapping file for that email. Since 2026-08-28
+devon's global git identity is the GitHub noreply address
+(`289773754+valicen-davidsaunders@users.noreply.github.com`), which upstream
+auto-resolves with no mapping file. Never rewrite authorship on already-opened PRs.
