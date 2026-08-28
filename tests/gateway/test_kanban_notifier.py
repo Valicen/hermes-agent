@@ -817,7 +817,7 @@ def test_root_gateway_delivers_for_profile_without_platform_adapter(tmp_path, mo
         tid = kb.create_task(conn, title="plumbing", assignee="ito")
         kbn.add_notify_sub(
             conn, task_id=tid, platform="telegram", chat_id="david-dm",
-            notifier_profile="pmo_project_manager",
+            notifier_profile="pmo_project_manager", delivery_mode="notify+wake",
         )
         kb.complete_task(conn, tid, summary="done")
     finally:
@@ -832,6 +832,8 @@ def test_root_gateway_delivers_for_profile_without_platform_adapter(tmp_path, mo
 
     assert [d["chat_id"] for d in adapter.sent] == ["david-dm"]
     assert tid in adapter.sent[0]["text"]
+    # Fallback is passive-only: never wake this gateway's agent in the owner's name.
+    assert adapter.handled == []
 
 
 def test_no_fallback_when_owner_profile_hosts_its_own_adapter(tmp_path, monkeypatch):
