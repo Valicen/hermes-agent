@@ -10,37 +10,53 @@ IO error) the boot snapshot stays ``None`` and detection no-ops — never a fals
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Paths whose content can never be imported/loaded by a running gateway.
+import re as _re
+_DOC_ONLY_RE = _re.compile(r"(^|/)(docs|website|\.github)/|\.(md|rst|txt)$", _re.IGNORECASE)
 _boot_fingerprint: str | None = None
 
 
-def _tree_fingerprint() -> str | None:
-    """Fingerprint of the checked-out TREE (``HEAD^{tree}``), not the commit.
+# Paths whose content can never be imported/loaded by a running gateway.
+_DOC_ONLY_RE = re.compile(r"(^|/)(docs|website|\.github)/|\.(md|rst|txt)$", re.IGNORECASE)
 
-    Two commits with identical content (a branch flip, a rebase that changes
-    nothing, a merge that only rewrites history) must not read as "stale
-    code": the modules on disk are byte-for-byte what the process loaded, so a
-    restart would change nothing. Comparing commit SHAs produced exactly that
-    false positive on 2026-08-27 — a branch switch with an identical tree
-    503'd the dashboard model picker for hours. Spawning ``git`` here is fine:
-    this runs once at boot and then only on demand (model switch / picker
-    load), never on a hot path. Returns ``None`` when git is unavailable so
-    the caller falls back to the ref/SHA reader.
+
+def _tree_fingerprint() -> str | None:
+    """Fingerprint of the checked-out TREE content, not the commit (Talaria row 7, PR #97407).
+
+    Two commits with identical content (a branch flip, a rebase that changes nothing, a
+    history-only merge) must not read as "stale code": the modules on disk are what the
+    process loaded, so a restart would change nothing. Comparing commit SHAs produced that
+    false positive on 2026-08-27 (dashboard model picker 503'd for hours). Only files the
+    process could have imported or loaded matter: a docs/ledger-only commit (README,
+    TALARIA.md, website/) changes the git tree but not one byte the gateway runs. Spawning
+    ``git`` here is fine — once at boot, then only on demand. ``None`` when git is unavailable
+    so the caller falls back to the ref/SHA reader.
     """
     try:
+        import hashlib
         import subprocess
         from hermes_cli._subprocess_compat import noninteractive_git_env
 
         # noninteractive_git_env: inert hooks/pager/fsmonitor (GHSA-7x36-8jrh-v4pw class).
         out = subprocess.run(
-            ["git", "-C", str(_PROJECT_ROOT), "rev-parse", "HEAD^{tree}"],
+            ["git", "-C", str(_PROJECT_ROOT), "ls-tree", "-r", "HEAD"],
             capture_output=True, text=True, timeout=5, check=False, env=noninteractive_git_env(),
         )
-        tree = out.stdout.strip() if out.returncode == 0 else ""
-        if tree and len(tree) >= 7 and all(c in "0123456789abcdef" for c in tree):
-            return f"tree:HEAD:{tree}"
+        if out.returncode != 0 or not out.stdout:
+            return None
+        digest = hashlib.sha256()
+        for line in out.stdout.splitlines():
+            # "<mode> <type> <blob>	<path>"
+            meta, _, path = line.partition("	")
+            if not path or _DOC_ONLY_RE.search(path):
+                continue
+            digest.update(meta.split(" ")[-1].encode("ascii", "ignore"))
+            digest.update(path.encode("utf-8", "ignore"))
+        return f"tree:HEAD:{digest.hexdigest()}"
     except Exception:
         pass
     return None

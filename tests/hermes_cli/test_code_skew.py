@@ -185,6 +185,11 @@ class TestTreeFingerprint:
         # A second commit with the SAME tree (branch flip / empty commit).
         self._git(repo, "commit", "-q", "--allow-empty", "-m", "two")
         assert code_skew.detect_code_skew() is None
+        # A docs-only change is not skew either: nothing the process runs moved.
+        (repo / "NOTES.md").write_text("ledger\n")
+        self._git(repo, "add", "NOTES.md")
+        self._git(repo, "commit", "-q", "-m", "docs")
+        assert code_skew.detect_code_skew() is None
         # A real content change IS skew.
         (repo / "a.py").write_text("x = 2\n")
         self._git(repo, "commit", "-q", "-am", "three")
