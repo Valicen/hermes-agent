@@ -12,7 +12,7 @@ mechanical.
 | # | Commit (subject) | Why we carry it | Files | Drop when upstream… |
 |---|---|---|---|---|
 | 1 | agent: auto-compaction on local endpoints + routed-model/token accounting | zeus llama.cpp (local, fixed window) must auto-compact even when `compression.enabled` is false; served-model + cache/reasoning token accounting feeds Argus spend views | agent/agent_init.py, agent_runtime_helpers.py, chat_completion_helpers.py, conversation_loop.py | auto-compacts on local endpoints by itself AND records the routed/served model per turn |
-| 2 | mcp: schema-cache TTL fix (**PR NousResearch#97410**), lazy tool loading, OAuth loopback relay | mcp 2.x SDK writes `ttl_ms=0` → upstream treats as instant expiry → every lookup MISS (CHG-23); OAuth refresh-token preservation; headless loopback relay | tools/mcp_schema_cache.py, mcp_tool.py, tool_search.py, mcp_oauth.py | `_entry_expired` (or equivalent) treats non-positive ttl as "no hint"; refresh token survives reauth; loopback works headless |
+| 2 | mcp: schema-cache TTL fix (our PR #97410 closed as duplicate of upstream **#92621**, the more complete fix — drop the TTL hunk when #92621 merges), lazy tool loading, OAuth loopback relay | mcp 2.x SDK writes `ttl_ms=0` → upstream treats as instant expiry → every lookup MISS (CHG-23); OAuth refresh-token preservation; headless loopback relay | tools/mcp_schema_cache.py, mcp_tool.py, tool_search.py, mcp_oauth.py | `_entry_expired` (or equivalent) treats non-positive ttl as "no hint"; refresh token survives reauth; loopback works headless |
 | 3 | desktop: served-model chip (commit subject says "timestamps" — misnamed) | Shows which model actually served a turn (openrouter/auto routes per call) in the desktop app, paired with #6 | apps/desktop/src/** (15 files, incl. i18n `turnModel`) | desktop shows the served model per turn natively |
 | 4 | cron: post-persistence completion events | Consumers get a durable report path after `save_job_output` instead of racing it (Argus/n8n notice pipelines depend on it) | cron/scheduler.py, tests/cron/test_completion_event.py | emits a completion event after persistence |
 | 5 | cli/desktop-entry: plugin-toolset validation race + venv-symlink desktop entry | `validate_toolset` raced background plugin discovery ("unknown toolset"); desktop entry Exec= survives venv symlinks (ops/upstream-hermes-desktop-entry-venv-symlink.md) | cli.py, hermes_cli/linux_desktop_entry.py | validation consults persisted plugin keys during discovery; Exec resolves the interpreter |
@@ -24,7 +24,7 @@ mechanical.
 
 ## Upstream PRs open
 
-#97407 skew guard · #97408 notify fallback · #97409 unconfirmed completion → review · #97410 schema-cache TTL. When one merges, the next `talaria sync` will report the corresponding commit as already-upstream: skip it and delete its row.
+#97407 skew guard · #97408 notify fallback · #97409 unconfirmed completion → review. (#97410 schema-cache TTL closed 2026-08-28 as a duplicate of #92621 — watch that one instead.) When one merges, the next `talaria sync` will report the corresponding commit as already-upstream: skip it and delete its row.
 
 ## Conflict playbook
 
