@@ -170,6 +170,80 @@ def _bot_relay_outbox_sig():
     return _bot_relay_outbox_seen or None
 
 
+# --- Kanban board movement (Valicen/Talaria row 11, PR candidate) -----------------------
+# The board DB is the only place dispatcher, workers and dashboard all write; broadcasting its
+# movement lets Argus (and any client) stop polling the board. Read-only sqlite URI probes only.
+
+
+def _kanban_boards_db_paths():
+    """Every on-disk kanban board DB (read-only probes only)."""
+    try:
+        from pathlib import Path as _Path
+        from hermes_cli import kanban_db as _kbb
+        from hermes_cli import kanban_db as _kbp
+        from hermes_cli import kanban_db as _kb
+        paths = []
+        for meta in _kbb.list_boards(include_archived=False):
+            slug = meta.get("slug") or _kb.DEFAULT_BOARD
+            db_path = meta.get("db_path")
+            path = _Path(db_path).expanduser() if db_path else _kbp.kanban_db_path(slug)
+            if path.is_file():
+                paths.append((slug, path))
+        return paths
+    except Exception:
+        return []
+
+
+_kanban_last_event_ids: dict[str, int] = {}
+
+
+def _kanban_sig():
+    """Highest task_events id per board — moves on every kanban transition (claimed/spawned/
+    heartbeat/commented/completed/blocked…). Read-only URI connection: never a write lock or
+    a migration."""
+    import sqlite3 as _sqlite3
+    sig = {}
+    for slug, path in _kanban_boards_db_paths():
+        try:
+            conn = _sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.2)
+            try:
+                row = conn.execute("SELECT MAX(id) FROM task_events").fetchone()
+            finally:
+                conn.close()
+            sig[slug] = int(row[0] or 0) if row else 0
+        except Exception:
+            continue
+    return tuple(sorted(sig.items())) if sig else None
+
+
+def _kanban_changed_payload():
+    """Events since the last broadcast, per board — enough for a consumer to refresh
+    precisely (task ids + kinds) without re-reading the whole board. Heartbeats folded out."""
+    import sqlite3 as _sqlite3
+    events = []
+    for slug, path in _kanban_boards_db_paths():
+        try:
+            conn = _sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.2)
+            try:
+                since = _kanban_last_event_ids.get(slug, 0)
+                rows = conn.execute(
+                    "SELECT e.id, e.task_id, e.kind, e.created_at, t.status, t.assignee, t.title "
+                    "FROM task_events e LEFT JOIN tasks t ON t.id = e.task_id "
+                    "WHERE e.id > ? AND e.kind != 'heartbeat' ORDER BY e.id LIMIT 200",
+                    (since,),
+                ).fetchall()
+                top = conn.execute("SELECT MAX(id) FROM task_events").fetchone()
+            finally:
+                conn.close()
+            _kanban_last_event_ids[slug] = int(top[0] or 0) if top else since
+            for r in rows:
+                events.append({"board": slug, "event_id": int(r[0]), "task_id": r[1], "kind": r[2],
+                               "at": r[3], "status": r[4], "assignee": r[5], "title": (r[6] or "")[:120]})
+        except Exception:
+            continue
+    return {"events": events}
+
+
 # event → (check interval, signature fn, payload fn). Signatures are stat-cheap; the interval
 # keeps pricier probes (pet resolves the sheet off disk) off the 0.5s tick. cron/jobs.json
 # moves on edits AND scheduler ticks; gateway_state.json is where the messaging gateway
@@ -181,12 +255,15 @@ _CHANGE_WATCHES: dict[str, tuple[float, Any, Any]] = {
     "platforms.changed": (2.0, lambda: _home_mtime_ns("gateway_state.json"), lambda: {}),
     "pairing.changed": (2.0, _pairing_sig, lambda: {}),
     # 1s so a queued DM envelope reaches the Desktop's push-triggered drain fast.
-    "bot_relay.outbox.pending": (1.0, _bot_relay_outbox_sig, lambda: {})}
+    "bot_relay.outbox.pending": (1.0, _bot_relay_outbox_sig, lambda: {}),
+    # Heartbeats are excluded from the payload; the signature still moves on them, so the
+    # 2s floor coalesces bursts (Talaria row 11).
+    "kanban.changed": (2.0, _kanban_sig, _kanban_changed_payload)}
 
 # state.db moves on every append of a streaming turn and gateway_state.json on
 # in-flight bookkeeping; the floor coalesces bursts to one broadcast per window,
 # trailing edge included (a floored change keeps its old signature, re-fires later).
-_CHANGE_BROADCAST_FLOOR_S = {"sessions.changed": 2.0, "platforms.changed": 5.0}
+_CHANGE_BROADCAST_FLOOR_S = {"sessions.changed": 2.0, "platforms.changed": 5.0, "kanban.changed": 2.0}
 
 _change_sigs: dict[str, Any] = {}
 _change_checked_at: dict[str, float] = {}
