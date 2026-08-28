@@ -51,3 +51,14 @@ PRs #97407/#97408/#97409 carry a mapping file for that email. Since 2026-08-28
 devon's global git identity is the GitHub noreply address
 (`289773754+valicen-davidsaunders@users.noreply.github.com`), which upstream
 auto-resolves with no mapping file. Never rewrite authorship on already-opened PRs.
+
+### Upstream review of #97408 (2026-08-28, andrexibiza)
+
+Two P1s: (1) `.env` absence is not authoritative — upstream `_getenv()` also reads
+`secret_scope`/`os.environ`; (2) fallback selects a platform, not an exact bot
+identity, and `_collect()` counted `_profile_adapters`-only platforms as hosted
+while the send site uses `self.adapters`. Decision: keep the fallback in Talaria
+(our fleet: one bot per platform, tokens in `.env`), fix (2)'s send-boundary bug
+locally (`fallback_platforms` = `self.adapters` only; test
+`test_no_fallback_claim_when_platform_hosted_only_by_secondary_profile`), and
+park #97408 as draft to restack on #81143/#76514 once they land.

@@ -866,6 +866,42 @@ def test_no_fallback_when_owner_profile_hosts_its_own_adapter(tmp_path, monkeypa
     assert len(_unseen_terminal_events_for(tid, "writer-dm")) == 1
 
 
+def test_no_fallback_claim_when_platform_hosted_only_by_secondary_profile(tmp_path, monkeypatch):
+    """Send-boundary guard: a process whose only telegram adapter belongs to a
+    secondary profile (in _profile_adapters, not self.adapters) must not claim
+    an orphan row — the fallback send site uses self.adapters and would find
+    nothing, stranding the claim on a gateway that cannot send."""
+    from gateway import kanban_watchers_notifier as kw
+
+    db_path = tmp_path / "secondary-only.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="secondary only", assignee="ito")
+        kbn.add_notify_sub(
+            conn, task_id=tid, platform="telegram", chat_id="orphan-dm",
+            notifier_profile="pmo_project_manager",
+        )
+        kb.complete_task(conn, tid, summary="done")
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(kw, "_profile_hosts_platform", lambda profile, platform: False)
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    runner.adapters = {}
+    runner._profile_adapters = {"beta": {Platform.TELEGRAM: adapter}}
+    runner._active_profile_name = lambda: "default"
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert adapter.sent == []
+    assert len(_unseen_terminal_events_for(tid, "orphan-dm")) == 1, (
+        "row must stay unclaimed for a gateway that can actually send"
+    )
+
+
 def test_profile_hosts_platform_reads_env(tmp_path, monkeypatch):
     from gateway import kanban_watchers_notifier as kw
     from hermes_cli import profiles as _profiles
