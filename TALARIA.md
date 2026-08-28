@@ -1,0 +1,37 @@
+# Talaria — Valicen's carried changes on top of upstream Hermes
+
+This branch (`talaria`) is upstream `NousResearch/hermes-agent` plus a SMALL
+stack of Valicen commits, rebased onto upstream by `talaria sync`
+(`~/argus/ops/talaria.py`). This file is the ledger a future conflict
+resolver reads first. Policy (David, 2026-08-28): **"better stays"** — when
+upstream reworks an area we touched, take upstream and drop or re-express
+our commit, UNLESS the commit is Valicen-specific and upstream still lacks
+it. Every entry below states the drop condition, so the decision is
+mechanical.
+
+| # | Commit (subject) | Why we carry it | Files | Drop when upstream… |
+|---|---|---|---|---|
+| 1 | agent: auto-compaction on local endpoints + routed-model/token accounting | zeus llama.cpp (local, fixed window) must auto-compact even when `compression.enabled` is false; served-model + cache/reasoning token accounting feeds Argus spend views | agent/agent_init.py, agent_runtime_helpers.py, chat_completion_helpers.py, conversation_loop.py | auto-compacts on local endpoints by itself AND records the routed/served model per turn |
+| 2 | mcp: schema-cache TTL fix, lazy tool loading, OAuth loopback relay | mcp 2.x SDK writes `ttl_ms=0` → upstream treats as instant expiry → every lookup MISS (CHG-23); OAuth refresh-token preservation; headless loopback relay | tools/mcp_schema_cache.py, mcp_tool.py, tool_search.py, mcp_oauth.py | `_entry_expired` (or equivalent) treats non-positive ttl as "no hint"; refresh token survives reauth; loopback works headless |
+| 3 | desktop: served-model chip (commit subject says "timestamps" — misnamed) | Shows which model actually served a turn (openrouter/auto routes per call) in the desktop app, paired with #6 | apps/desktop/src/** (15 files, incl. i18n `turnModel`) | desktop shows the served model per turn natively |
+| 4 | cron: post-persistence completion events | Consumers get a durable report path after `save_job_output` instead of racing it (Argus/n8n notice pipelines depend on it) | cron/scheduler.py, tests/cron/test_completion_event.py | emits a completion event after persistence |
+| 5 | cli/desktop-entry: plugin-toolset validation race + venv-symlink desktop entry | `validate_toolset` raced background plugin discovery ("unknown toolset"); desktop entry Exec= survives venv symlinks (ops/upstream-hermes-desktop-entry-venv-symlink.md) | cli.py, hermes_cli/linux_desktop_entry.py | validation consults persisted plugin keys during discovery; Exec resolves the interpreter |
+| 6 | tui: report the model that actually served the turn | `_last_served_model` in session.info payload → Argus/desktop served-model display | tui_gateway/server.py | session.info carries the served model |
+| 7 | code-skew: fingerprint the checked-out TREE, not the commit | Branch flips with identical trees are not stale code (5h picker outage 2026-08-27) — **PR candidate** | gateway/code_skew.py, tests/test_code_skew.py | compares tree content |
+| 8+9 | kanban notifier: deliver for profiles that cannot host the platform (passive-only) | Worker-profile subs on a platform only the root gateway hosts were unclaimable forever — **PR candidate** | gateway/kanban_watchers.py, tests/gateway/test_kanban_notifier.py | delivery falls back to a platform-hosting gateway (or subscribe-time validation rejects) |
+
+## Conflict playbook
+
+1. `talaria status` first: the conflict forecast names overlapping files.
+2. Rebase happens in `/tmp/talaria-sync-worktree`; the live tree is untouched
+   until tests pass there.
+3. On a conflict in a file above: read the "Drop when" column. If upstream now
+   satisfies it → `git rebase --skip` that commit and delete its row here. If
+   not → keep our hunk minimal on top of upstream's new shape; prefer
+   upstream's structure, re-express our intent.
+4. Add/add conflicts at the end of test files: keep both blocks (upstream first).
+5. `talaria sync --from-worktree` to validate, test, move, restart, push.
+6. Keep this table honest in the same commit as any change to the stack.
+
+Sync history: see `~/argus/ops/logs/talaria-sync.log` and the
+`talaria-pre-sync-*` tags (rollback points).
