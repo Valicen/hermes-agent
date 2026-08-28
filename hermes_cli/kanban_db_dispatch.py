@@ -957,16 +957,38 @@ class _DeadWorker:
     event_payload: dict
     protocol_violation: bool = False
     rate_limited: bool = False
+    # Talaria row 10 (upstream PR #97409): the worker's completion comment when a clean
+    # exit left its RESULT on the card — routed to review instead of retried.
+    unconfirmed_completion: Optional[str] = None
 
     @property
     def run_outcome(self) -> str:
         # A rate-limited requeue is recorded as ``rate_limited`` so board history
         # doesn't show a phantom crash for a quota wall.
-        return "rate_limited" if self.rate_limited else "crashed"
+        if self.rate_limited:
+            return "rate_limited"
+        return "unconfirmed_completion" if self.unconfirmed_completion else "crashed"
+
+
+def _completion_comment_for_run(conn, task_id: str, assignee: Optional[str], started_at) -> Optional[str]:
+    """Latest comment the assignee posted during this run, or None (Talaria row 10)."""
+    if conn is None or not assignee:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT body FROM task_comments WHERE task_id = ? AND author = ? AND created_at >= ? "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id, assignee, int(started_at or 0) - 1),
+        ).fetchone()
+    except Exception:
+        return None
+    body = str(row["body"] or "").strip() if row is not None else ""
+    return body or None
 
 
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], *, task_id: Optional[str] = None, board: Optional[str] = None,
+    conn=None, assignee: Optional[str] = None, started_at=None,
 ) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
@@ -975,6 +997,23 @@ def _classify_dead_worker(
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
     dead = _classify_dead_worker_exit(pid, claimer)
+    if dead.protocol_violation and task_id:
+        # Valicen/Talaria row 10: a clean exit is not a failure when the worker left its
+        # RESULT on the card — a comment by the assignee during this run. Re-running such a
+        # task burns a whole budget redoing finished work and then auto-blocks a done card
+        # ("Iteration budget exhausted", t_a5199403, 2026-08-25). Route it to review: the
+        # human/reviewer sees the comment and confirms with one click.
+        excerpt = _completion_comment_for_run(conn, task_id, assignee, started_at)
+        if excerpt:
+            dead = _DeadWorker(
+                dead.kind, dead.code,
+                "worker exited cleanly (rc=0) after posting a completion comment but without "
+                "calling kanban_complete — routed to review instead of retry (unconfirmed completion).",
+                "unconfirmed_completion",
+                {"pid": pid, "claimer": claimer, "exit_code": dead.code, "unconfirmed_completion": True,
+                 "comment_excerpt": excerpt[:280]},
+                unconfirmed_completion=excerpt,
+            )
     if task_id and not dead.rate_limited:
         worker_output = _worker_final_output(task_id, board=board)
         if worker_output:
@@ -1033,6 +1072,8 @@ class _CrashSweep:
     # Worker-exit observer payloads, fired only after every reclaim/accounting
     # txn has committed.
     exited_hook_payloads: list[dict] = field(default_factory=list)
+    # ``(task_id, comment_excerpt, run_id)`` handed to request_review after the txn (Talaria row 10).
+    review_candidates: list[tuple[str, str, Optional[int]]] = field(default_factory=list)
 
 
 def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None) -> _CrashSweep:
@@ -1058,7 +1099,10 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 continue
 
             pid = int(row["worker_pid"])
-            dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board)
+            dead = _classify_dead_worker(
+                pid, row["claim_lock"], task_id=row["id"], board=board, conn=conn,
+                assignee=_kb._row_get(row, "assignee"), started_at=started_at,
+            )
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
@@ -1099,6 +1143,11 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 )
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
+            elif dead.unconfirmed_completion:
+                # Not a failure: the result is on the card. Hand off to review after the
+                # txn (request_review needs its own write_txn); consecutive_failures untouched.
+                conn.execute("UPDATE tasks SET last_failure_error = NULL WHERE id = ?", (row["id"],))
+                sweep.review_candidates.append((row["id"], dead.unconfirmed_completion, run_id))
             else:
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append(
@@ -1180,6 +1229,20 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     sweep = _reclaim_dead_workers(conn, board=board)
     # Outside the main txn: account each crash and maybe trip the breaker.
     auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
+    # Unconfirmed completions (Talaria row 10): the worker's own comment is the summary.
+    # request_review emits ``review_requested`` (a terminal notifier kind), so the
+    # subscriber is woken to confirm with kanban_complete or send it back.
+    for _tid, _excerpt, _run_id in sweep.review_candidates:
+        try:
+            ok = _kb.request_review(
+                conn, _tid,
+                summary="[unconfirmed completion — worker exited without kanban_complete] " + _excerpt[:1500],
+                metadata={"source": "unconfirmed_completion", "run_id": _run_id}, force=True,
+            )
+            if not ok:
+                _kb._log.warning("kanban: unconfirmed completion for %s could not enter review; left at its source phase", _tid)
+        except Exception as _exc:
+            _kb._log.warning("kanban: unconfirmed-completion review handoff failed for %s: %s", _tid, _exc)
     # Side-channel attributes keep the public ``list[str]`` return stable;
     # ``dispatch_once`` reads them to populate ``DispatchResult``. Rate-limited
     # requeues did NOT count a failure and are NOT crashes.
