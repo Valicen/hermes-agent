@@ -800,3 +800,78 @@ def test_review_requested_does_not_wake_a_notify_only_subscription(
     assert adapter.handled == [], (
         "notify-only subscriptions must not be woken by a review handoff"
     )
+
+def test_root_gateway_delivers_for_profile_without_platform_adapter(tmp_path, monkeypatch):
+    """A worker-profile subscription on a platform that profile cannot host is
+    delivered by the gateway that does host it (Valicen 2026-08-27: a PM
+    profile subscribed David's Telegram DM; the PM gateway had no messaging
+    platforms, the root gateway skipped the foreign row, nothing was ever sent).
+    """
+    from gateway import kanban_watchers_notifier as kw
+
+    db_path = tmp_path / "fallback.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="plumbing", assignee="ito")
+        kbn.add_notify_sub(
+            conn, task_id=tid, platform="telegram", chat_id="david-dm",
+            notifier_profile="pmo_project_manager",
+        )
+        kb.complete_task(conn, tid, summary="done")
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(kw, "_profile_hosts_platform", lambda profile, platform: False)
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    runner._active_profile_name = lambda: "default"
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert [d["chat_id"] for d in adapter.sent] == ["david-dm"]
+    assert tid in adapter.sent[0]["text"]
+
+
+def test_no_fallback_when_owner_profile_hosts_its_own_adapter(tmp_path, monkeypatch):
+    """Fail-closed rule preserved: an owner with its own bot is never served
+    by another gateway's adapter (that would send from the wrong bot)."""
+    from gateway import kanban_watchers_notifier as kw
+
+    db_path = tmp_path / "no-fallback.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="own bot", assignee="ito")
+        kbn.add_notify_sub(
+            conn, task_id=tid, platform="telegram", chat_id="writer-dm",
+            notifier_profile="writer",
+        )
+        kb.complete_task(conn, tid, summary="done")
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(kw, "_profile_hosts_platform", lambda profile, platform: True)
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    runner._active_profile_name = lambda: "default"
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert adapter.sent == []
+    assert len(_unseen_terminal_events_for(tid, "writer-dm")) == 1
+
+
+def test_profile_hosts_platform_reads_env(tmp_path, monkeypatch):
+    from gateway import kanban_watchers_notifier as kw
+    from hermes_cli import profiles as _profiles
+
+    monkeypatch.setattr(_profiles, "get_profile_dir", lambda name: tmp_path / name)
+    (tmp_path / "hosts").mkdir(); (tmp_path / "hosts" / ".env").write_text("TELEGRAM_BOT_TOKEN=123:abc\n")
+    (tmp_path / "bare").mkdir(); (tmp_path / "bare" / ".env").write_text("OPENAI_API_KEY=x\n")
+    assert kw._profile_hosts_platform("hosts", "telegram") is True
+    assert kw._profile_hosts_platform("bare", "telegram") is False
+    assert kw._profile_hosts_platform("missing", "telegram") is False
+    assert kw._profile_hosts_platform("bare", "not-a-platform") is True

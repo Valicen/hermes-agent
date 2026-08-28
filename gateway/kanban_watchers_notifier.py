@@ -163,6 +163,45 @@ def _adapter_for_subscription(runner: Any, platform: Any, sub: dict, owner_profi
     return primary if profile == primary_profile else None
 
 
+def _profile_hosts_platform(profile: str, platform_str: str) -> bool:
+    """Does *profile* run its own adapter for *platform_str*?
+
+    Decided from configuration, not from this process's registries: in a
+    one-gateway-per-profile deployment the root gateway cannot see what other
+    gateway processes host, but it CAN read the owner profile's ``.env``. A
+    profile that has no bot token for the platform cannot deliver on it
+    anywhere, so refusing to deliver on its behalf just drops the message —
+    the "kanban_notify to telegram from a worker profile silently never
+    arrives" failure (Valicen, 2026-08-27; Talaria rows 8+9, upstream PR
+    #97408). Unknown platforms (no token env var in the canonical map) answer
+    True: fail closed, no fallback.
+    """
+    try:
+        from gateway.config import PLATFORM_TOKEN_ENV_NAMES, Platform as _P
+        from hermes_cli.profiles import get_profile_dir
+
+        try:
+            plat = _P(platform_str)
+        except ValueError:
+            return True
+        env_name = PLATFORM_TOKEN_ENV_NAMES.get(plat)
+        if not env_name:
+            return True
+        env_file = get_profile_dir(profile or "default") / ".env"
+        if not env_file.is_file():
+            return False
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[7:].strip()
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == env_name:
+                return bool(value.strip().strip("'\""))
+        return False
+    except Exception:
+        return True
+
+
 # --- Collection (runs in a worker thread) ---
 
 
@@ -191,6 +230,10 @@ class _Collector:
         # and again at delivery, rewinding if the route or adapter changed.
         self.active_platforms = _platform_names(runner.adapters).union(
             *(_platform_names(m) for m in self.profile_adapters.values()))
+        # Fallback deliveries (Talaria rows 8+9) send through THIS process's own adapters
+        # only: a platform hosted here solely by a secondary profile is in active_platforms
+        # for the coarse pre-filter, but claiming such a row would strand it.
+        self.fallback_platforms = _platform_names(runner.adapters)
 
     def collect(self) -> list[dict]:
         if not self.active_platforms:
@@ -225,8 +268,14 @@ class _Collector:
                          "for board %s (%s); falling back to writable open", slug, exc)
             return True
         if count == 0:
-            logger.debug("kanban notifier: board %s has no subscriptions owned by %s; skipping open",
-                         slug, sorted(self.notifier_profiles))
+            # Zero owned but non-zero total still needs the open: the fallback below may
+            # serve rows whose owner profile cannot host the platform (Talaria rows 8+9).
+            try:
+                if _kbn().count_notify_subs(board=slug) != 0:
+                    return True
+            except Exception:
+                return True
+            logger.debug("kanban notifier: board %s has no subscriptions at all; skipping open", slug)
         return count != 0
 
     def _gc_stale_subs(self, conn: Any, slug: str) -> None:
@@ -262,6 +311,48 @@ class _Collector:
                      len(events), sub["task_id"], slug, old_cursor, cursor)
         return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug}
 
+    def _claim_fallback_subs(self, conn: Any, slug: str, subs: list[dict]) -> None:
+        """Delivery fallback (Talaria rows 8+9, upstream PR #97408): a subscription owned by
+        a profile that has NO adapter for its platform anywhere (checked from that profile's
+        ``.env``) can only ever be delivered by a gateway that does host the platform — this
+        one. Without this the row sits unclaimed forever with no error. The "never fall back
+        to the default profile's adapter" rule stays intact for owners that run their own
+        bot: those are skipped as before. "default" is the canonical platform host, its rows
+        are never orphans; legacy unstamped rows stay with the dispatcher."""
+        owned_names = set(self.notifier_profiles)
+        try:
+            candidates = [
+                o for o in _kbn().list_notify_subs(conn)
+                if (o.get("notifier_profile") or "") not in owned_names
+                and (o.get("notifier_profile") or "") not in ("", "default")
+                and (o.get("platform") or "").lower() in self.fallback_platforms
+            ]
+        except Exception:
+            candidates = []
+        already = {(s["task_id"], s["platform"], s["chat_id"], s.get("thread_id") or "") for s in subs}
+        for sub in candidates:
+            if (sub["task_id"], sub["platform"], sub["chat_id"], sub.get("thread_id") or "") in already:
+                continue
+            try:
+                owner_profile = sub.get("notifier_profile") or ""
+                platform = (sub.get("platform") or "").lower()
+                if _profile_hosts_platform(owner_profile, platform):
+                    continue
+                old_cursor, cursor, events = _kbn().claim_unseen_events_for_sub(
+                    conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
+                    thread_id=sub.get("thread_id") or "", kinds=TERMINAL_KINDS,
+                )
+                if not events:
+                    continue
+                task = self.kb.get_task(conn, sub["task_id"])
+                logger.info("kanban notifier: delivering %s for %s on behalf of profile %s (it hosts no %s adapter)",
+                            [getattr(e, "kind", "?") for e in events], sub["task_id"], owner_profile, platform)
+                self.deliveries.append({"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events,
+                                        "task": task, "board": slug, "fallback": True})
+            except Exception as sub_exc:
+                logger.warning("kanban notifier: fallback subscription for %s on board %s failed: %s",
+                               sub.get("task_id"), slug, sub_exc)
+
     def collect_board(self, slug: str) -> None:
         """Claim events on one board, appending delivery dicts to ``deliveries``."""
         if not self._board_has_subs(slug):
@@ -290,6 +381,7 @@ class _Collector:
                     # One bad subscription must not block the rest of the tick.
                     logger.warning("kanban notifier: subscription for %s on board %s failed: %s",
                                    sub.get("task_id"), slug, sub_exc)
+            self._claim_fallback_subs(conn, slug, subs)
         finally:
             conn.close()
 
@@ -455,6 +547,14 @@ class _KanbanNotification:
         # The wake self-post path needs the key even when every event was skipped.
         self.sub_key = (sub["task_id"], sub["platform"], sub["chat_id"], sub.get("thread_id") or "")
         mode = sub.get("delivery_mode") or "notify"
+        if d.get("fallback") and mode != "notify":
+            # A fallback delivery runs on a gateway that is NOT the subscription owner's:
+            # waking "the agent" here would wake this gateway's agent in the owner's name
+            # (the root agent answered for chief-of-staff tasks on the first live run,
+            # 2026-08-28). Deliver passively only. (Talaria row 9.)
+            logger.info("kanban notifier: fallback delivery for %s downgraded %s -> notify (owner profile %s not hosted here)",
+                        sub["task_id"], mode, sub.get("notifier_profile"))
+            mode = "notify"
         self.wake_agent = mode in ("notify+wake", "wake")
         self.send_passive = mode != "wake"
         # Worker handoff carried into the synthetic wake turn so the woken
@@ -661,8 +761,17 @@ class _KanbanNotification:
         except ValueError:
             await self.advance()
             return
-        # Recheck the exact route after claiming: config/adapters can change between ticks.
-        adapter = _adapter_for_subscription(self.runner, self.plat, self.sub, self.sub_profile or None)
+        # Same chokepoint as authorization: a stamped profile is served by ITS
+        # same-platform adapter and never falls back to the default profile's
+        # bot (cross-profile mis-delivery). None only when the profile (or
+        # default) has no adapter.
+        if self.d.get("fallback"):
+            # Owner profile hosts no adapter for this platform (see _Collector._claim_fallback_subs);
+            # this gateway's own adapter delivers. (Talaria rows 8+9.)
+            adapter = (getattr(self.runner, "adapters", None) or {}).get(self.plat)
+        else:
+            # Recheck the exact route after claiming: config/adapters can change between ticks.
+            adapter = _adapter_for_subscription(self.runner, self.plat, self.sub, self.sub_profile or None)
         if adapter is None:
             logger.debug("kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
                          self.platform_str, self.task_id)
