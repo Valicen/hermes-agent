@@ -113,6 +113,18 @@ The name "tier" is OpenRouter's (`cost_tier`); it is a *price/quality band*,
 not reasoning effort (`/reasoning` is a separate command). If the vocabulary
 grates, the command is one `CommandDef` entry and can be aliased.
 
+### Role matrix (Valicen, 2026-08-29)
+
+Bands are set per **profile**, on top of the session class, following one
+operating rule: *cheap models execute, smart models decide.* Deciders
+(David's chat, chief-of-staff, every `*_director`) run `high` on frontier
+vendors only and may auto-escalate to `xhigh`; executors (analyst, project
+manager, hunters, sync/watchdog) run `medium` interactive / `low`
+kanban+cron on any vendor in band and are capped at `medium` — an executor
+escalates competence through kanban to its director, never by promoting its
+own band. The file uses YAML anchors (`&decider`, `&executor`) so a role is
+one line to move.
+
 ### Why the tier is per *session*, not per turn
 
 The original wish was "the exactly appropriate model per turn". We
