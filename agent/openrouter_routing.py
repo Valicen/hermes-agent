@@ -32,7 +32,12 @@ What this module does, per API call on an OpenRouter route:
 3. Resolves the effective tier:  ``/tier`` session override  >  env
    ``HERMES_ROUTING_TIER``  >  session class default + automatic escalation.
 4. Emits ``plugins[auto-router]`` (only when the model is ``openrouter/auto``)
-   and ``provider.ignore`` (for every OpenRouter model — the Bedrock endpoint
+   with the band and a PRICE CEILING: every model in OpenRouter's live
+   catalogue priced above ``price_ceiling`` ($/M prompt or completion) is
+   passed as ``excluded_models`` — Opus, Fable, GPT-5.5, the *-pro tiers,
+   o1/o3-pro, whatever appears tomorrow — until the tier reaches
+   ``ceiling_lifted_at``. Name globs in ``excluded_models`` are added on top.
+   ``provider.ignore`` goes on every OpenRouter model (the Bedrock endpoint
    bills the full prefix with zero cache reads).
 5. Escalates one tier automatically after N API errors / empty responses in
    a session (capped at ``escalation.max_auto_tier``), so a model that is
@@ -40,8 +45,8 @@ What this module does, per API call on an OpenRouter route:
 
 Loosening the belt (all documented in docs/routing-policy.md):
   * ``/tier high|xhigh|max`` in any chat — this session only (``max`` lifts the
-    Opus cage; automation stops at ``xhigh``).
-  * ``/tier auto`` — keep the cage but let the router pick freely inside it.
+    price ceiling; automation stops at ``xhigh``).
+  * ``/tier auto`` — keep the ceiling but let the router pick freely under it.
   * edit ``routing-policy.yaml`` (fleet-wide or per profile) — live.
   * ``enabled: false`` in the file, or env ``HERMES_ROUTING_POLICY=off`` —
     pure ``openrouter/auto`` as before.
@@ -67,10 +72,24 @@ POLICY_FILENAME = "routing-policy.yaml"
 # asked, never let Anthropic traffic land on the no-cache Bedrock endpoint.
 DEFAULT_POLICY: Dict[str, Any] = {
     "enabled": True,
-    "excluded_models": ["anthropic/claude-opus*"],
+    # Price ceiling ($ per million tokens). Models above EITHER number are
+    # excluded from the Auto Router's choice until the tier reaches
+    # ``ceiling_lifted_at``. 3/15 keeps sonnet-5 ($2/$10), gpt-5.6-sol/terra
+    # ($2/$10-12) and kimi-k3 ($3/$15) and drops opus-5 ($5/$25), fable-5
+    # ($10/$50), gpt-5.5 ($5/$30), every *-pro and o1 tier.
+    "price_ceiling": {"prompt": 3.0, "completion": 15.0},
+    "ceiling_lifted_at": "max",
+    # Extra name globs excluded on top of the price ceiling (always).
+    "excluded_models": [],
+    # Used ONLY when the catalogue cannot be fetched and no cache exists.
+    "fallback_excluded_models": [
+        "anthropic/claude-opus*", "anthropic/claude-fable*", "openai/gpt-5.5*",
+        "openai/*-pro", "openai/o1*", "openai/o3-pro", "openai/gpt-4",
+        "openai/gpt-4-turbo*", "sakana/fugu-ultra",
+    ],
     "allowed_models": [],
     "ignore_providers": ["amazon-bedrock"],
-    "cage_lifted_at": "max",
+    "catalog_ttl_hours": 24,
     "tiers": {
         "cron": "low",
         "kanban": "medium",
@@ -174,8 +193,137 @@ def effective_policy(profile: Optional[str] = None) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# OpenRouter catalogue → price-derived exclusion list
+# ---------------------------------------------------------------------------
+
+CATALOG_URL = "https://openrouter.ai/api/v1/models"
+CATALOG_CACHE_NAME = "routing-policy.models-cache.json"
+_catalog_lock = __import__("threading").Lock()
+_excl_cache: Dict[str, Any] = {"key": None, "ids": None}
+
+
+def catalog_cache_path() -> Path:
+    override = os.environ.get("HERMES_ROUTING_MODELS_CACHE")
+    if override:
+        return Path(override).expanduser()
+    return fleet_root() / CATALOG_CACHE_NAME
+
+
+def _fetch_catalog(timeout: float = 6.0) -> Optional[List[Dict[str, Any]]]:
+    """Public endpoint, no key. Returns the model list or None on any failure."""
+    try:
+        import json
+        import urllib.request
+        req = urllib.request.Request(CATALOG_URL, headers={"User-Agent": "talaria-routing-policy/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        models = data.get("data") if isinstance(data, dict) else None
+        return models if isinstance(models, list) and models else None
+    except Exception as exc:
+        logger.warning("routing policy: catalogue fetch failed (%s)", exc)
+        return None
+
+
+def _write_catalog_cache(path: Path, models: List[Dict[str, Any]]) -> None:
+    try:
+        import json
+        slim = [{"id": m.get("id"), "pricing": {
+            "prompt": (m.get("pricing") or {}).get("prompt"),
+            "completion": (m.get("pricing") or {}).get("completion")}} for m in models if m.get("id")]
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"fetched_at": time.time(), "data": slim}), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:
+        logger.debug("routing policy: cannot write catalogue cache (%s)", exc)
+
+
+def load_catalog(ttl_hours: float = 24.0) -> Tuple[Optional[List[Dict[str, Any]]], Optional[float]]:
+    """Cached catalogue. Fresh → cache; stale → cache now + background refresh;
+    missing → synchronous fetch (bounded). Returns (models, fetched_at)."""
+    import json
+    import threading
+    path = catalog_cache_path()
+    cached, fetched_at = None, None
+    try:
+        if path.is_file():
+            blob = json.loads(path.read_text(encoding="utf-8"))
+            cached, fetched_at = blob.get("data"), float(blob.get("fetched_at") or 0)
+    except Exception:
+        cached, fetched_at = None, None
+    fresh = cached is not None and fetched_at and (time.time() - fetched_at) < ttl_hours * 3600
+    if fresh:
+        return cached, fetched_at
+    if cached is not None:
+        # Serve stale, refresh once in the background.
+        if _catalog_lock.acquire(blocking=False):
+            def _refresh():
+                try:
+                    models = _fetch_catalog()
+                    if models:
+                        _write_catalog_cache(path, models)
+                finally:
+                    _catalog_lock.release()
+            threading.Thread(target=_refresh, name="routing-catalog-refresh", daemon=True).start()
+        return cached, fetched_at
+    with _catalog_lock:
+        models = _fetch_catalog()
+        if models:
+            _write_catalog_cache(path, models)
+            return models, time.time()
+    return None, None
+
+
+def _price(m: Dict[str, Any], key: str) -> float:
+    try:
+        return float((m.get("pricing") or {}).get(key) or 0.0) * 1e6
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def models_over_ceiling(policy: Dict[str, Any]) -> Tuple[List[str], str]:
+    """IDs priced above the ceiling, and a short provenance string.
+
+    Falls back to ``fallback_excluded_models`` (name globs) when no catalogue
+    is available at all, so the ceiling degrades to the old name-based cage
+    instead of to nothing.
+    """
+    ceiling = policy.get("price_ceiling") or {}
+    try:
+        max_prompt = float(ceiling.get("prompt")) if ceiling.get("prompt") is not None else None
+        max_completion = float(ceiling.get("completion")) if ceiling.get("completion") is not None else None
+    except (TypeError, ValueError):
+        max_prompt = max_completion = None
+    if max_prompt is None and max_completion is None:
+        return [], "no price ceiling"
+    ttl = float(policy.get("catalog_ttl_hours") or 24)
+    models, fetched_at = load_catalog(ttl)
+    if not models:
+        fb = [str(x) for x in (policy.get("fallback_excluded_models") or [])]
+        return fb, "catalogue unavailable — name fallback"
+    key = (max_prompt, max_completion, fetched_at)
+    if _excl_cache["key"] == key and _excl_cache["ids"] is not None:
+        return list(_excl_cache["ids"]), f"catalogue {time.strftime('%Y-%m-%d %H:%M', time.localtime(fetched_at or 0))}"
+    ids = sorted({
+        str(m["id"]) for m in models if m.get("id") and (
+            (max_prompt is not None and _price(m, "prompt") > max_prompt)
+            or (max_completion is not None and _price(m, "completion") > max_completion))
+    })
+    _excl_cache.update({"key": key, "ids": ids})
+    return list(ids), f"catalogue {time.strftime('%Y-%m-%d %H:%M', time.localtime(fetched_at or 0))}"
+
+
+# ---------------------------------------------------------------------------
 # Tiers
 # ---------------------------------------------------------------------------
+
+# What each band bought on one representative prompt, 2026-08-29 (docs/routing-policy.md).
+TIER_GUIDE: Dict[str, str] = {
+    "low":    "cheapest capable models  (~$0.1–0.3/M in)   e.g. deepseek-v4-flash, gpt-5.6-luna, gemini-3.7-flash",
+    "medium": "mid-price workhorses     (~$0.5–1.5/M in)   e.g. glm-5.2, deepseek-v4-pro",
+    "high":   "frontier, non-premium    (~$2/M in)         e.g. claude-sonnet-5, gpt-5.6-sol/terra",
+    "xhigh":  "strongest under ceiling  (~$2–3/M in)       e.g. kimi-k3, gpt-5.6-sol",
+    "max":    "no band, ceiling lifted  ($5–10+/M in)      e.g. claude-opus-5, claude-fable-5, gpt-5.5",
+}
 
 def tier_index(tier: Optional[str]) -> int:
     try:
@@ -263,12 +411,28 @@ def resolve_tier(agent: Any, policy: Dict[str, Any]) -> Tuple[Optional[str], str
     return tier, source
 
 
-def _cage_active(tier: Optional[str], policy: Dict[str, Any]) -> bool:
-    """The exclusion list applies unless the tier reached ``cage_lifted_at``."""
-    lift_at = policy.get("cage_lifted_at")
+def _ceiling_active(tier: Optional[str], policy: Dict[str, Any]) -> bool:
+    """The price ceiling applies unless the tier reached ``ceiling_lifted_at``."""
+    lift_at = policy.get("ceiling_lifted_at", policy.get("cage_lifted_at"))
     if tier is None or tier_index(lift_at) < 0:
         return True
     return tier_index(tier) < tier_index(lift_at)
+
+
+_cage_active = _ceiling_active  # backwards-compatible alias
+
+
+def exclusion_list(tier: Optional[str], policy: Dict[str, Any]) -> Tuple[List[str], str]:
+    """Price-derived exclusions (while the ceiling is active) + name globs (always)."""
+    names = [str(x) for x in (policy.get("excluded_models") or []) if str(x).strip()]
+    if not _ceiling_active(tier, policy):
+        return names, "ceiling lifted"
+    priced, prov = models_over_ceiling(policy)
+    merged = list(priced)
+    for n in names:
+        if n not in merged:
+            merged.append(n)
+    return merged, prov
 
 
 # ---------------------------------------------------------------------------
@@ -309,8 +473,8 @@ def routing_extra_body(agent: Any, model: Optional[str] = None,
         allowed = [str(x) for x in (policy.get("allowed_models") or []) if str(x).strip()]
         if allowed:
             plugin["allowed_models"] = allowed
-        excluded = [str(x) for x in (policy.get("excluded_models") or []) if str(x).strip()]
-        if excluded and _cage_active(tier, policy):
+        excluded, _prov = exclusion_list(tier, policy)
+        if excluded:
             plugin["excluded_models"] = excluded
         fragment["plugins"] = [plugin]
 
@@ -364,10 +528,12 @@ def apply_routing_policy(agent: Any, api_kwargs: Dict[str, Any]) -> Dict[str, An
     }
     try:
         if getattr(agent, "_routing_last", None) != snapshot:
+            _ex = snapshot["excluded"]
+            _ex_text = (f"{len(_ex)} models over price ceiling" if len(_ex) > 4 else ",".join(_ex)) or "-"
             logger.info(
                 "routing policy: class=%s tier=%s (%s) excluded=%s ignore=%s model=%s",
                 snapshot["class"], snapshot["tier"] or "auto", snapshot["source"],
-                ",".join(snapshot["excluded"]) or "-", ",".join(snapshot["ignore"]) or "-",
+                _ex_text, ",".join(snapshot["ignore"]) or "-",
                 api_kwargs.get("model"),
             )
         agent._routing_last = snapshot
@@ -435,14 +601,28 @@ def describe(agent: Any) -> str:
         return "Routing policy: not applicable (this session is not on OpenRouter)."
     tier, source = resolve_tier(agent, policy)
     klass = classify_session(agent)
-    cage = policy.get("excluded_models") or []
+    ceiling = policy.get("price_ceiling") or {}
+    excluded, prov = exclusion_list(tier, policy)
     lines = [
-        f"Routing policy: tier {tier or 'auto'} ({source}); session class {klass}.",
-        f"Cage: {', '.join(cage) if cage else 'none'}"
-        + (f" — lifted at {policy.get('cage_lifted_at')}" if cage else "")
-        + (" [LIFTED for this tier]" if cage and not _cage_active(tier, policy) else ""),
-        f"Ignored providers: {', '.join(policy.get('ignore_providers') or []) or 'none'}.",
+        f"Routing tier: {tier or 'auto'} ({source}); session class {klass}.",
+        "",
+        "What the bands mean (per-million-token input price, example models):",
     ]
+    for name in TIERS:
+        mark = "▶" if name == (tier or "") else " "
+        lines.append(f"  {mark} {name:6s} {TIER_GUIDE.get(name, '')}")
+    lines.append("")
+    if ceiling.get("prompt") is not None or ceiling.get("completion") is not None:
+        state = "LIFTED for this tier" if not _ceiling_active(tier, policy) else "active"
+        lines.append(
+            f"Price ceiling: ${ceiling.get('prompt')}/M in, ${ceiling.get('completion')}/M out — {state}; "
+            f"{len(excluded)} models excluded ({prov})"
+            + (": " + ", ".join(excluded[:6]) + (" …" if len(excluded) > 6 else "") if excluded else "")
+            + f". Lifted at tier {policy.get('ceiling_lifted_at', 'max')}."
+        )
+    else:
+        lines.append(f"Price ceiling: none. Name exclusions: {', '.join(excluded) or 'none'}.")
+    lines.append(f"Ignored providers: {', '.join(policy.get('ignore_providers') or []) or 'none'}.")
     esc = policy.get("escalation") or {}
     lines.append(
         f"Auto-escalation: {'on' if esc.get('auto', True) else 'off'} "

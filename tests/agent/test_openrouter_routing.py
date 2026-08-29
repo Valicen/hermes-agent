@@ -9,10 +9,29 @@ import pytest
 from agent import openrouter_routing as rp
 
 
+CATALOG = {"fetched_at": 4102444800.0, "data": [   # far-future fetched_at = always fresh
+    {"id": "anthropic/claude-opus-5", "pricing": {"prompt": "0.000005", "completion": "0.000025"}},
+    {"id": "anthropic/claude-fable-5", "pricing": {"prompt": "0.00001", "completion": "0.00005"}},
+    {"id": "openai/gpt-5.5", "pricing": {"prompt": "0.000005", "completion": "0.00003"}},
+    {"id": "openai/o1-pro", "pricing": {"prompt": "0.00015", "completion": "0.0006"}},
+    {"id": "anthropic/claude-sonnet-5", "pricing": {"prompt": "0.000002", "completion": "0.00001"}},
+    {"id": "moonshotai/kimi-k3", "pricing": {"prompt": "0.000003", "completion": "0.000015"}},
+    {"id": "deepseek/deepseek-v4-flash", "pricing": {"prompt": "0.00000008", "completion": "0.00000017"}},
+    {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
+]}
+OVER_DEFAULT_CEILING = ["anthropic/claude-fable-5", "anthropic/claude-opus-5", "openai/gpt-5.5", "openai/o1-pro"]
+
+
 @pytest.fixture
 def policy_file(tmp_path, monkeypatch):
+    import json
     path = tmp_path / "routing-policy.yaml"
     monkeypatch.setenv("HERMES_ROUTING_POLICY_FILE", str(path))
+    cat = tmp_path / "models-cache.json"
+    cat.write_text(json.dumps(CATALOG), encoding="utf-8")
+    monkeypatch.setenv("HERMES_ROUTING_MODELS_CACHE", str(cat))
+    monkeypatch.setattr(rp, "_fetch_catalog", lambda timeout=6.0: None)   # never hit the network
+    rp._excl_cache.update({"key": None, "ids": None})
     monkeypatch.delenv("HERMES_ROUTING_TIER", raising=False)
     monkeypatch.delenv("HERMES_ROUTING_POLICY", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
@@ -44,7 +63,7 @@ def test_defaults_cage_opus_and_ignore_bedrock(policy_file):
     plug = kw["extra_body"]["plugins"][0]
     assert plug["id"] == "auto-router"
     assert plug["cost_tier"] == "high"                       # interactive default
-    assert plug["excluded_models"] == ["anthropic/claude-opus*"]
+    assert plug["excluded_models"] == OVER_DEFAULT_CEILING   # price ceiling, not a name list
     assert kw["extra_body"]["provider"]["ignore"] == ["amazon-bedrock"]
 
 
@@ -68,23 +87,23 @@ def test_session_class_is_sticky(policy_file, monkeypatch):
     assert rp.classify_session(agent) == "cron"
 
 
-def test_tier_override_wins_and_max_lifts_cage(policy_file):
+def test_tier_override_wins_and_max_lifts_ceiling(policy_file):
     agent = _agent()
     agent._routing_tier_override = "max"
     plug = rp.apply_routing_policy(agent, _kwargs())["extra_body"]["plugins"][0]
     assert plug["cost_tier"] == "max"
-    assert "excluded_models" not in plug              # cage lifted at max
+    assert "excluded_models" not in plug              # ceiling lifted at max
     agent._routing_tier_override = "xhigh"
     plug = rp.apply_routing_policy(agent, _kwargs())["extra_body"]["plugins"][0]
-    assert plug["excluded_models"] == ["anthropic/claude-opus*"]
+    assert plug["excluded_models"] == OVER_DEFAULT_CEILING
 
 
-def test_tier_auto_keeps_cage_without_band(policy_file):
+def test_tier_auto_keeps_ceiling_without_band(policy_file):
     agent = _agent()
     agent._routing_tier_override = "auto"
     plug = rp.apply_routing_policy(agent, _kwargs())["extra_body"]["plugins"][0]
     assert "cost_tier" not in plug
-    assert plug["excluded_models"] == ["anthropic/claude-opus*"]
+    assert plug["excluded_models"] == OVER_DEFAULT_CEILING
 
 
 def test_env_tier_beats_class_default(policy_file, monkeypatch):
@@ -117,7 +136,7 @@ def test_disabled_by_file_and_by_env(policy_file, monkeypatch):
 def test_file_overrides_and_profile_section(policy_file, monkeypatch):
     policy_file(
         "tiers:\n  interactive: medium\n"
-        "excluded_models: []\n"
+        "price_ceiling: {prompt: null, completion: null}\n"
         "profiles:\n  ito_it_director:\n    tiers:\n      interactive: xhigh\n"
         "    ignore_providers: [amazon-bedrock, groq]\n"
     )
@@ -165,7 +184,7 @@ def test_auto_escalation_steps_one_band_after_threshold(policy_file):
     rp.note_failure(agent, "api_error"); assert rp.note_failure(agent, "api_error") == "xhigh"
     rp.note_failure(agent, "api_error"); assert rp.note_failure(agent, "api_error") is None   # capped at xhigh
     assert rp.apply_routing_policy(agent, _kwargs())["extra_body"]["plugins"][0]["cost_tier"] == "xhigh"
-    assert "excluded_models" in rp.apply_routing_policy(agent, _kwargs())["extra_body"]["plugins"][0]
+    assert "excluded_models" in rp.apply_routing_policy(agent, _kwargs())["extra_body"]["plugins"][0]   # ceiling still on at xhigh
 
 
 def test_auto_escalation_can_be_disabled(policy_file):
@@ -182,7 +201,45 @@ def test_explicit_override_is_not_escalated(policy_file):
     assert rp.apply_routing_policy(agent, _kwargs())["extra_body"]["plugins"][0]["cost_tier"] == "low"
 
 
-def test_describe_mentions_tier_and_file(policy_file):
+def test_describe_mentions_tier_ceiling_and_file(policy_file):
     text = rp.describe(_agent(platform="cron"))
-    assert "tier low" in text and "routing-policy.yaml" in text
-    assert "amazon-bedrock" in text
+    assert "tier: low" in text and "routing-policy.yaml" in text
+    assert "amazon-bedrock" in text and "Price ceiling: $3.0/M in" in text and "4 models excluded" in text
+    assert "claude-opus-5" in text
+
+
+def test_price_ceiling_is_configurable_and_name_globs_add_on_top(policy_file):
+    policy_file("price_ceiling: {prompt: 2.5, completion: 20}\nexcluded_models: ['perplexity/*']\n")
+    plug = rp.apply_routing_policy(_agent(), _kwargs())["extra_body"]["plugins"][0]
+    # kimi-k3 ($3 in) now over the prompt ceiling; sonnet-5 ($2) stays
+    assert plug["excluded_models"] == OVER_DEFAULT_CEILING[:2] + ["moonshotai/kimi-k3"] + OVER_DEFAULT_CEILING[2:] + ["perplexity/*"] \
+        or set(plug["excluded_models"]) == set(OVER_DEFAULT_CEILING + ["moonshotai/kimi-k3", "perplexity/*"])
+    assert "anthropic/claude-sonnet-5" not in plug["excluded_models"]
+
+
+def test_no_catalogue_falls_back_to_name_globs(policy_file, monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("HERMES_ROUTING_MODELS_CACHE", str(tmp_path / "missing.json"))
+    rp._excl_cache.update({"key": None, "ids": None})
+    plug = rp.apply_routing_policy(_agent(), _kwargs())["extra_body"]["plugins"][0]
+    assert "anthropic/claude-opus*" in plug["excluded_models"]
+    assert "anthropic/claude-fable*" in plug["excluded_models"]
+
+
+def test_stale_catalogue_is_served_and_refreshed_in_background(policy_file, monkeypatch, tmp_path):
+    import json, threading
+    cat = tmp_path / "models-cache.json"
+    stale = dict(CATALOG); stale["fetched_at"] = 1.0
+    cat.write_text(json.dumps(stale), encoding="utf-8")
+    rp._excl_cache.update({"key": None, "ids": None})
+    fetched = threading.Event()
+    def fake_fetch(timeout=6.0):
+        fetched.set()
+        return [{"id": "anthropic/claude-opus-5", "pricing": {"prompt": "0.000005", "completion": "0.000025"}}]
+    monkeypatch.setattr(rp, "_fetch_catalog", fake_fetch)
+    plug = rp.apply_routing_policy(_agent(), _kwargs())["extra_body"]["plugins"][0]
+    assert plug["excluded_models"] == OVER_DEFAULT_CEILING            # stale served immediately
+    assert fetched.wait(5)
+    for _ in range(50):
+        if json.loads(cat.read_text())["fetched_at"] > 1.0: break
+        __import__("time").sleep(0.05)
+    assert json.loads(cat.read_text())["fetched_at"] > 1.0             # refreshed on disk

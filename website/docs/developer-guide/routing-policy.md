@@ -56,13 +56,53 @@ right after `_build_api_kwargs`, before request middleware):
    `/tier` session override → env `HERMES_ROUTING_TIER` → class default from
    the file (+ automatic escalation steps).
 4. **Emit** `plugins[auto-router]` (only when the model is `openrouter/auto`;
-   a pinned model gets no plugin) with `cost_tier`, `allowed_models`,
-   `excluded_models` (unless the tier reached `cage_lifted_at`), and
-   `provider.ignore` for *every* OpenRouter model. Existing `plugins` /
-   `provider` entries in the request are merged, not clobbered.
+   a pinned model gets no plugin) with `cost_tier`, `allowed_models`, the
+   **price-ceiling exclusion list** (see below; unless the tier reached
+   `ceiling_lifted_at`), and `provider.ignore` for *every* OpenRouter model.
+   Existing `plugins` / `provider` entries in the request are merged, not
+   clobbered.
 5. **Log** one INFO line per session (and again whenever the decision
    changes): `routing policy: class=kanban tier=medium (class kanban)
-   excluded=anthropic/claude-opus* ignore=amazon-bedrock model=openrouter/auto`.
+   excluded=31 models over price ceiling ignore=amazon-bedrock model=openrouter/auto`.
+
+### The price ceiling (why not a list of names)
+
+A name list ("exclude Opus") is too specific — Claude Fable 5 is $10/$50,
+GPT-5.5 is $5/$30, the `*-pro` and `o1` tiers go up to $150/$600, and new
+premium models appear monthly. So the guard is a **price**:
+`price_ceiling: {prompt: 3.0, completion: 15.0}` ($ per million tokens).
+On each call the module takes OpenRouter's public catalogue
+(`/api/v1/models`, cached in `~/.hermes/routing-policy.models-cache.json`,
+refreshed in the background every `catalog_ttl_hours`) and passes every
+model priced above either number as `excluded_models`. Today that is 31
+models. 3/15 keeps sonnet-5 ($2/$10), gpt-5.6-sol/terra ($2/$10–12) and
+kimi-k3 ($3/$15); it drops opus-5 ($5/$25), fable-5 ($10/$50), gpt-5.5
+($5/$30) and everything above. Verified live: `/tier max` *with* the
+ceiling still yields kimi-k3; with the ceiling lifted, opus-5.
+
+If the catalogue has never been fetched and cannot be (offline), the module
+falls back to `fallback_excluded_models` name globs (opus, fable, gpt-5.5,
+*-pro, o1*, …) and logs a warning — it degrades to the old name cage, never
+to "no cage". `excluded_models` name globs are applied on top, always, even
+at `max`.
+
+### What the bands mean
+
+`/tier` prints this table. Bands are OpenRouter's, characterised on one
+representative prompt on 2026-08-29; the *input* price is what matters for
+our prefix-heavy shape.
+
+| Band | Roughly | Examples |
+|---|---|---|
+| `low` | cheapest capable, ~$0.1–0.3/M in | deepseek-v4-flash, gpt-5.6-luna, gemini-3.7-flash |
+| `medium` | mid-price workhorses, ~$0.5–1.5/M in | glm-5.2, deepseek-v4-pro |
+| `high` | frontier, non-premium, ~$2/M in | claude-sonnet-5, gpt-5.6-sol/terra |
+| `xhigh` | strongest under the ceiling, ~$2–3/M in | kimi-k3, gpt-5.6-sol |
+| `max` | no band **and the ceiling is lifted**, $5–10+/M in | claude-opus-5, claude-fable-5, gpt-5.5 |
+
+The name "tier" is OpenRouter's (`cost_tier`); it is a *price/quality band*,
+not reasoning effort (`/reasoning` is a separate command). If the vocabulary
+grates, the command is one `CommandDef` entry and can be aliased.
 
 ### Why the tier is per *session*, not per turn
 
@@ -92,20 +132,21 @@ Ordered from fastest/most local to most global. All are reversible.
 | When you want… | Do this | Scope | Takes effect |
 |---|---|---|---|
 | A stronger model for *this* conversation | `/tier high`, `/tier xhigh` | this chat session (cleared by `/new`, `/tier reset`) | next call |
-| Opus for this conversation | `/tier max` — lifts the exclusion cage | this session | next call |
-| The router to choose freely but still no Opus | `/tier auto` | this session | next call |
+| Premium models (Opus, Fable, GPT-5.5 …) for this conversation | `/tier max` — lifts the price ceiling | this session | next call |
+| The router to choose freely under the ceiling | `/tier auto` | this session | next call |
 | Back to policy default | `/tier reset` | this session | next call |
 | See what applies right now | `/tier` or `/tier status` | — | — |
 | A whole class stronger (e.g. all kanban workers) | edit `tiers.kanban: high` in `routing-policy.yaml` | fleet | next call, every profile |
 | One profile stronger | `profiles.<name>.tiers.interactive: xhigh` in the file | that profile | next call |
-| Opus allowed anywhere the router wants it | `excluded_models: []` in the file | fleet (or per profile) | next call |
-| Automation allowed to reach Opus | `escalation.max_auto_tier: max` | fleet / profile | next call |
+| Opus/GPT-5.5 allowed but not Fable/pro tiers | `price_ceiling.prompt: 6` in the file | fleet (or per profile) | next call |
+| No ceiling at all | `price_ceiling: {prompt: null, completion: null}` | fleet / profile | next call |
+| Automation allowed to reach premium models | `escalation.max_auto_tier: max` | fleet / profile | next call |
 | One process pinned regardless of file | `HERMES_ROUTING_TIER=xhigh` in that profile's `.env` | that profile's gateway | restart that gateway |
 | Everything off, exactly the old behaviour | `enabled: false` in the file, **or** `HERMES_ROUTING_POLICY=off` in a profile's `.env` | fleet / one profile | next call / restart |
 
 Tightening is the same table in reverse; the defaults shipped in the file
 are the 2026-08-29 decision: cron/subagent `low`, kanban `medium`,
-interactive `high`, Opus only via `/tier max`, Bedrock never.
+interactive `high`, premium models only via `/tier max`, Bedrock never.
 
 ## Observability
 
@@ -122,6 +163,8 @@ interactive `high`, Opus only via `/tier max`, Bedrock never.
 | Situation | Behaviour |
 |---|---|
 | Policy file missing | built-in defaults (same as the shipped file) |
+| Catalogue stale | served as-is, refreshed once in a background thread |
+| Catalogue missing and unreachable | name-glob fallback list + WARNING |
 | Policy file malformed | WARNING + defaults; inference continues |
 | Any exception inside the policy | WARNING `routing policy: skipped (...)`; the request goes out unmodified |
 | Model is not `openrouter/auto` | no auto-router plugin; `provider.ignore` still applied |
