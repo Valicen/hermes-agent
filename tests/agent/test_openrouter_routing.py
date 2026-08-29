@@ -65,6 +65,17 @@ def test_defaults_cage_opus_and_ignore_bedrock(policy_file):
     assert plug["cost_tier"] == "high"                       # interactive default
     assert plug["excluded_models"] == OVER_DEFAULT_CEILING   # price ceiling, not a name list
     assert kw["extra_body"]["provider"]["ignore"] == ["amazon-bedrock"]
+    assert kw["extra_body"]["provider"]["data_collection"] == "deny"     # privacy default
+
+
+def test_data_collection_is_configurable_and_policy_wins_on_merge(policy_file):
+    policy_file("data_collection: allow\n")
+    kw = rp.apply_routing_policy(_agent(), _kwargs(extra_body={"provider": {"data_collection": "deny", "order": ["x"]}}))
+    assert kw["extra_body"]["provider"]["data_collection"] == "allow"
+    assert kw["extra_body"]["provider"]["order"] == ["x"]
+    policy_file("data_collection: null\nignore_providers: []\n")
+    kw = rp.apply_routing_policy(_agent(), _kwargs())
+    assert "provider" not in kw["extra_body"]
 
 
 @pytest.mark.parametrize("platform,env,expected", [
@@ -171,7 +182,7 @@ def test_merge_keeps_existing_plugins_and_provider_prefs(policy_file):
     ids = [p["id"] for p in kw["extra_body"]["plugins"]]
     assert ids == ["web", "auto-router"]                 # ours replaced the stale one
     assert kw["extra_body"]["plugins"][1]["cost_tier"] == "high"
-    assert kw["extra_body"]["provider"] == {"order": ["anthropic"], "ignore": ["groq", "amazon-bedrock"]}
+    assert kw["extra_body"]["provider"] == {"order": ["anthropic"], "ignore": ["groq", "amazon-bedrock"], "data_collection": "deny"}
 
 
 def test_auto_escalation_steps_one_band_after_threshold(policy_file):

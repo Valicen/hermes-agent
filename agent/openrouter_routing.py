@@ -89,6 +89,10 @@ DEFAULT_POLICY: Dict[str, Any] = {
     ],
     "allowed_models": [],
     "ignore_providers": ["amazon-bedrock"],
+    # OpenRouter provider.data_collection: "deny" excludes endpoints that may
+    # retain prompts/completions non-transiently (David, 2026-08-29). Live
+    # check: every band and every model we use still had endpoints under deny.
+    "data_collection": "deny",
     "catalog_ttl_hours": 24,
     "tiers": {
         "cron": "low",
@@ -479,8 +483,14 @@ def routing_extra_body(agent: Any, model: Optional[str] = None,
         fragment["plugins"] = [plugin]
 
     ignore = [str(x) for x in (policy.get("ignore_providers") or []) if str(x).strip()]
+    provider_prefs: Dict[str, Any] = {}
     if ignore:
-        fragment["provider"] = {"ignore": ignore}
+        provider_prefs["ignore"] = ignore
+    data_collection = str(policy.get("data_collection") or "").strip().lower()
+    if data_collection in ("allow", "deny"):
+        provider_prefs["data_collection"] = data_collection
+    if provider_prefs:
+        fragment["provider"] = provider_prefs
 
     if not fragment:
         return None
@@ -512,11 +522,14 @@ def apply_routing_policy(agent: Any, api_kwargs: Dict[str, Any]) -> Dict[str, An
         extra["plugins"] = existing + fragment["plugins"]
     if "provider" in fragment:
         prov = dict(extra.get("provider") or {})
-        merged_ignore = list(prov.get("ignore") or [])
-        for slug in fragment["provider"]["ignore"]:
-            if slug not in merged_ignore:
-                merged_ignore.append(slug)
-        prov["ignore"] = merged_ignore
+        if fragment["provider"].get("ignore"):
+            merged_ignore = list(prov.get("ignore") or [])
+            for slug in fragment["provider"]["ignore"]:
+                if slug not in merged_ignore:
+                    merged_ignore.append(slug)
+            prov["ignore"] = merged_ignore
+        if fragment["provider"].get("data_collection"):
+            prov["data_collection"] = fragment["provider"]["data_collection"]   # policy wins
         extra["provider"] = prov
     api_kwargs["extra_body"] = extra
 
@@ -525,15 +538,16 @@ def apply_routing_policy(agent: Any, api_kwargs: Dict[str, Any]) -> Dict[str, An
         "class": meta.get("class"),
         "excluded": list((fragment.get("plugins") or [{}])[0].get("excluded_models") or []),
         "ignore": list(fragment.get("provider", {}).get("ignore") or []),
+        "data_collection": fragment.get("provider", {}).get("data_collection") or "",
     }
     try:
         if getattr(agent, "_routing_last", None) != snapshot:
             _ex = snapshot["excluded"]
             _ex_text = (f"{len(_ex)} models over price ceiling" if len(_ex) > 4 else ",".join(_ex)) or "-"
             logger.info(
-                "routing policy: class=%s tier=%s (%s) excluded=%s ignore=%s model=%s",
+                "routing policy: class=%s tier=%s (%s) excluded=%s ignore=%s data_collection=%s model=%s",
                 snapshot["class"], snapshot["tier"] or "auto", snapshot["source"],
-                _ex_text, ",".join(snapshot["ignore"]) or "-",
+                _ex_text, ",".join(snapshot["ignore"]) or "-", snapshot["data_collection"] or "-",
                 api_kwargs.get("model"),
             )
         agent._routing_last = snapshot
@@ -622,7 +636,8 @@ def describe(agent: Any) -> str:
         )
     else:
         lines.append(f"Price ceiling: none. Name exclusions: {', '.join(excluded) or 'none'}.")
-    lines.append(f"Ignored providers: {', '.join(policy.get('ignore_providers') or []) or 'none'}.")
+    lines.append(f"Ignored providers: {', '.join(policy.get('ignore_providers') or []) or 'none'}; "
+                 f"data_collection: {policy.get('data_collection') or 'allow (OpenRouter default)'}.")
     esc = policy.get("escalation") or {}
     lines.append(
         f"Auto-escalation: {'on' if esc.get('auto', True) else 'off'} "

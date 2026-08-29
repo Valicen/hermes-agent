@@ -37,6 +37,7 @@ model nobody chose. Three facts explain it:
 | `plugins[auto-router].excluded_models` (globs) | Router never picks these | `anthropic/claude-opus*` excluded at xhigh → `gpt-5.6-sol` |
 | `plugins[auto-router].allowed_models` (globs) | Router only picks these | `anthropic/*` → `claude-sonnet-5` |
 | `provider: {ignore: [...]}` | Endpoint never used, for any model | `amazon-bedrock` ignored → Sonnet served by Google Vertex |
+| `provider: {data_collection: "deny"}` | Excludes endpoints that may retain prompts/completions | every band and every model we use still served (sonnet-5→Google, glm-5.2→Makora, deepseek-flash→Reka, kimi-k3→Together); **on by default since 2026-08-29** |
 | `provider: {max_price: {...}}` | Applied **after** the model choice; if the chosen model's endpoints all exceed it the request **fails** (`404 No endpoints found that satisfy the max price`) | **Not used** — it fails instead of degrading |
 
 ## What the policy does
@@ -58,7 +59,8 @@ right after `_build_api_kwargs`, before request middleware):
 4. **Emit** `plugins[auto-router]` (only when the model is `openrouter/auto`;
    a pinned model gets no plugin) with `cost_tier`, `allowed_models`, the
    **price-ceiling exclusion list** (see below; unless the tier reached
-   `ceiling_lifted_at`), and `provider.ignore` for *every* OpenRouter model.
+   `ceiling_lifted_at`), and `provider.ignore` + `provider.data_collection`
+   for *every* OpenRouter model.
    Existing `plugins` / `provider` entries in the request are merged, not
    clobbered.
 5. **Log** one INFO line per session (and again whenever the decision
@@ -113,6 +115,21 @@ between a fresh user ask and its tool-result continuations re-bills its
 whole prefix at every flip. Per-session bands keep the cache warm; the
 per-turn intelligence stays inside the band with the Auto Router.
 
+## Where you set it: pickers, not slash commands
+
+Chats hosted by the dashboard (Argus, the desktop app) send everything —
+including a typed `/tier` — to the model as a prompt; the gateway slash
+dispatcher only sees Telegram/Discord/etc. and the CLI. So the dashboard
+exposes the tier exactly like the model and fast mode: **`config.set
+key=tier value=<band|auto|reset|status>`** (session-scoped; the pin lives in
+`create_routing_tier_override` and `_make_agent` re-applies it on lazy
+builds and `/new`). `status` returns the effective tier, its source, the
+price-ceiling summary and the band guide; `session.info` carries
+`routing_tier`. Argus renders this as a **Tier dropdown next to the chat
+model** (label shows the effective band; "policy default" = whatever the
+file says for an interactive session; `max` is spelled out as "ceiling
+lifted — premium models"). `/tier` remains for CLI and messaging gateways.
+
 ## Automatic escalation (the "ideally automatic" part)
 
 `note_failure()` is called from the conversation loop on every API-error
@@ -140,6 +157,7 @@ Ordered from fastest/most local to most global. All are reversible.
 | One profile stronger | `profiles.<name>.tiers.interactive: xhigh` in the file | that profile | next call |
 | Opus/GPT-5.5 allowed but not Fable/pro tiers | `price_ceiling.prompt: 6` in the file | fleet (or per profile) | next call |
 | No ceiling at all | `price_ceiling: {prompt: null, completion: null}` | fleet / profile | next call |
+| Back to OpenRouter's full provider pool (privacy off) | `data_collection: allow` | fleet / profile | next call |
 | Automation allowed to reach premium models | `escalation.max_auto_tier: max` | fleet / profile | next call |
 | One process pinned regardless of file | `HERMES_ROUTING_TIER=xhigh` in that profile's `.env` | that profile's gateway | restart that gateway |
 | Everything off, exactly the old behaviour | `enabled: false` in the file, **or** `HERMES_ROUTING_POLICY=off` in a profile's `.env` | fleet / one profile | next call / restart |
