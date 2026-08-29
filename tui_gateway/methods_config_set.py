@@ -202,6 +202,63 @@ def _set_fast(rid, params, key, value, session):
     return _kv(rid, key, nv)
 
 
+def _set_tier(rid, params, key, value, session):
+    """Talaria row 12: session-scoped OpenRouter cost band (desktop/Argus pickers).
+
+    value: low|medium|high|xhigh|max|auto (pin), reset (drop pin), status (report only). Never
+    touches config.yaml; durable knobs live in ~/.hermes/routing-policy.yaml
+    (docs/routing-policy.md). Without a session (a chat not created yet) it reports the
+    profile's policy default so pickers can show it before the first message; ``profile``
+    names the target profile ("default" = root).
+    """
+    from types import SimpleNamespace as _NS
+    from agent.openrouter_routing import (
+        TIERS, TIER_GUIDE, effective_policy, policy_enabled, normalize_tier,
+        resolve_tier, exclusion_list, classify_session,
+    )
+    raw = str(value or "").strip().lower()
+    agent = session.get("agent") if session else None
+    _profile_hint = str(params.get("profile") or "").strip() or None
+    if session is None and raw not in {"", "status"}:
+        return _err(rid, 4002, "tier is session-scoped; pass session_id")
+    if raw not in {"", "status"}:
+        if raw == "reset":
+            session.pop("create_routing_tier_override", None)
+            if agent is not None:
+                agent._routing_tier_override = None
+                agent._routing_escalation = 0
+                agent._routing_failures = 0
+        else:
+            tier = normalize_tier(raw)
+            if tier is None:
+                return _err(rid, 4002, f"unknown tier: {value} (use {', '.join(TIERS)}, auto, reset)")
+            session["create_routing_tier_override"] = tier
+            if agent is not None:
+                agent._routing_tier_override = tier
+        if agent is not None:
+            _persist_live_session_runtime(session)
+            _emit("session.info", params.get("session_id", ""), _session_info(agent, session))
+    policy = effective_policy(_profile_hint) if session is None else effective_policy()
+    probe = agent if agent is not None else _NS(
+        platform="browser", provider="openrouter", model=_resolve_model() or "openrouter/auto",
+        _routing_tier_override=(session or {}).get("create_routing_tier_override"),
+    )
+    tier, source = resolve_tier(probe, policy)
+    excluded, provenance = exclusion_list(tier, policy)
+    ceiling = policy.get("price_ceiling") or {}
+    return _ok(rid, {
+        "key": key, "value": tier or "auto", "source": source,
+        "override": (session or {}).get("create_routing_tier_override"),
+        "enabled": policy_enabled(policy), "session_class": classify_session(probe),
+        "allowed_models": list(policy.get("allowed_models") or []), "profile": _profile_hint or None,
+        "ceiling": {"prompt": ceiling.get("prompt"), "completion": ceiling.get("completion"),
+                    "lifted_at": policy.get("ceiling_lifted_at", "max"),
+                    "excluded_count": len(excluded), "provenance": provenance, "examples": excluded[:8]},
+        "escalation_steps": int(getattr(agent, "_routing_escalation", 0) or 0) if agent is not None else 0,
+        "bands": [{"tier": t, "guide": TIER_GUIDE.get(t, "")} for t in TIERS],
+    })
+
+
 def _set_busy(rid, params, key, value, session):
     if _word(value) in {"", "status"}:
         return _kv(rid, key, _load_busy_input_mode())
@@ -457,7 +514,7 @@ def _set_display_toggle(rid, params, key, value, session):
 # ── dispatch
 
 _CONFIG_SETTERS = {
-    "model": _set_model, "fast": _set_fast, "busy": _set_busy, "verbose": _set_verbose, "focus": _set_focus,
+    "model": _set_model, "fast": _set_fast, "tier": _set_tier, "busy": _set_busy, "verbose": _set_verbose, "focus": _set_focus,
     "approval_mode": _set_approval_mode, "approvals.mode": _set_word, "yolo": _set_yolo,
     "reasoning": _set_reasoning, "details_mode": _set_word, "thinking_mode": _set_word,
     "density": _set_toggle, "battery": _set_toggle, "theme": _set_word,

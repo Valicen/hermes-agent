@@ -2076,6 +2076,23 @@ def _turn_started_at(session: dict | None) -> float | None:
     return float(inflight["started_at"]) if isinstance(inflight, dict) and inflight.get("started_at") else None
 
 
+def _routing_tier_label(agent, session=None) -> str:
+    """Effective Talaria routing tier for session.info ('' when not on OpenRouter). Talaria row 12."""
+    try:
+        from agent.openrouter_routing import effective_policy, policy_enabled, resolve_tier, _is_openrouter
+        if agent is None:
+            return str((session or {}).get("create_routing_tier_override") or "")
+        if not _is_openrouter(agent):
+            return ""
+        policy = effective_policy()
+        if not policy_enabled(policy):
+            return "off"
+        tier, _ = resolve_tier(agent, policy)
+        return tier or "auto"
+    except Exception:
+        return ""
+
+
 def _session_info(agent, session: dict | None = None) -> dict:
     if session is None:
         session = next((c for c in _sessions.values() if c.get("agent") is agent), None)
@@ -2114,6 +2131,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "model": pending_model or mirror.get("model", getattr(agent, "model", "")),
         "provider": pending_provider or provider,
         "reasoning_effort": reasoning_effort, "service_tier": service_tier, "fast": service_tier == "priority",
+        "routing_tier": _routing_tier_label(agent, session),  # Talaria row 12
         "yolo": yolo, "approval_mode": approval_mode,
         "tools": dict(mirror.get("tools") or {}) if isinstance(mirror.get("tools"), dict) else {},
         "skills": dict(mirror.get("skills") or {}) if isinstance(mirror.get("skills"), dict) else {},
@@ -2386,6 +2404,14 @@ def _make_agent(
     if context_cwd_is_launch_artifact is None:
         context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(session)
     agent._context_cwd_is_launch_artifact = bool(context_cwd_is_launch_artifact)
+    # Talaria row 12: a session-scoped tier pin (desktop or Argus picker via config.set key=tier)
+    # survives lazy builds and /new rebuilds exactly like create_service_tier_override does.
+    try:
+        _tier_pin = (_sessions.get(sid) or {}).get("create_routing_tier_override")
+        if _tier_pin:
+            agent._routing_tier_override = _tier_pin
+    except Exception:
+        pass
     return agent
 
 
