@@ -107,6 +107,15 @@ def test_unknown_value_and_missing_session_are_errors():
     assert "error" in nosess
 
 
+def test_status_without_session_reports_profile_policy_default(monkeypatch):
+    """New chats (no runtime yet) can ask for the profile's policy default."""
+    with patch.object(server, "_resolve_model", return_value="openrouter/auto"):
+        resp = _set({"key": "tier", "value": "status", "profile": "default"})
+    assert resp["result"]["value"] == "high" and resp["result"]["override"] is None
+    assert resp["result"]["profile"] == "default"
+    assert "bands" in resp["result"] and "allowed_models" in resp["result"]
+
+
 def test_pre_build_session_pin_is_reported():
     session = {"session_key": "k2", "agent": None, "create_routing_tier_override": "low"}
     with patch.dict(server._sessions, {"s2": session}, clear=False), \
