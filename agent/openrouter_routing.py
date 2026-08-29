@@ -88,7 +88,23 @@ DEFAULT_POLICY: Dict[str, Any] = {
         "openai/gpt-4-turbo*", "sakana/fugu-ultra",
     ],
     "allowed_models": [],
-    "ignore_providers": ["amazon-bedrock"],
+    # Providers to try FIRST for whatever model the router picks (OpenRouter
+    # provider.order with allow_fallbacks). Rationale (2026-08-29 experiment):
+    # prompt caching is per provider; first-party/caching providers returned
+    # cached_tokens on the second call (Z.AI, Anthropic via Google/Bedrock,
+    # OpenInference for deepseek-flash) while some cheap resellers (Io Net,
+    # DigitalOcean) returned zero — and cached reads are ~90% of our tokens,
+    # so a caching provider beats a 20% cheaper non-caching one 5-8x.
+    "prefer_providers": [
+        "anthropic", "openai", "azure", "google-vertex", "google-ai-studio",
+        "z-ai", "deepseek", "moonshotai", "x-ai", "mistral",
+        "openinference", "novita", "siliconflow",
+    ],
+    # Endpoints never used. Empty by default: the 2026-08-29 experiment showed
+    # amazon-bedrock caches Anthropic prompts like any other endpoint (the
+    # earlier "zero cache reads" reading came from unresolved openrouter/auto
+    # accounting rows, not from billing).
+    "ignore_providers": [],
     # OpenRouter provider.data_collection: "deny" excludes endpoints that may
     # retain prompts/completions non-transiently (David, 2026-08-29). Live
     # check: every band and every model we use still had endpoints under deny.
@@ -489,6 +505,10 @@ def routing_extra_body(agent: Any, model: Optional[str] = None,
     data_collection = str(policy.get("data_collection") or "").strip().lower()
     if data_collection in ("allow", "deny"):
         provider_prefs["data_collection"] = data_collection
+    prefer = [str(x) for x in (policy.get("prefer_providers") or []) if str(x).strip()]
+    if prefer:
+        provider_prefs["order"] = prefer
+        provider_prefs["allow_fallbacks"] = True
     if provider_prefs:
         fragment["provider"] = provider_prefs
 
@@ -530,6 +550,12 @@ def apply_routing_policy(agent: Any, api_kwargs: Dict[str, Any]) -> Dict[str, An
             prov["ignore"] = merged_ignore
         if fragment["provider"].get("data_collection"):
             prov["data_collection"] = fragment["provider"]["data_collection"]   # policy wins
+        if fragment["provider"].get("order") and not prov.get("order"):
+            # An explicit per-request/provider-routing order (config.yaml
+            # provider_routing or a /model --provider pin) wins over the
+            # policy's caching preference.
+            prov["order"] = list(fragment["provider"]["order"])
+            prov.setdefault("allow_fallbacks", True)
         extra["provider"] = prov
     api_kwargs["extra_body"] = extra
 
@@ -539,6 +565,7 @@ def apply_routing_policy(agent: Any, api_kwargs: Dict[str, Any]) -> Dict[str, An
         "excluded": list((fragment.get("plugins") or [{}])[0].get("excluded_models") or []),
         "ignore": list(fragment.get("provider", {}).get("ignore") or []),
         "data_collection": fragment.get("provider", {}).get("data_collection") or "",
+        "prefer": list(fragment.get("provider", {}).get("order") or []),
     }
     try:
         if getattr(agent, "_routing_last", None) != snapshot:
@@ -637,7 +664,8 @@ def describe(agent: Any) -> str:
     else:
         lines.append(f"Price ceiling: none. Name exclusions: {', '.join(excluded) or 'none'}.")
     lines.append(f"Ignored providers: {', '.join(policy.get('ignore_providers') or []) or 'none'}; "
-                 f"data_collection: {policy.get('data_collection') or 'allow (OpenRouter default)'}.")
+                 f"data_collection: {policy.get('data_collection') or 'allow (OpenRouter default)'}; "
+                 f"preferred (caching) providers first: {', '.join(policy.get('prefer_providers') or []) or 'none'}.")
     esc = policy.get("escalation") or {}
     lines.append(
         f"Auto-escalation: {'on' if esc.get('auto', True) else 'off'} "

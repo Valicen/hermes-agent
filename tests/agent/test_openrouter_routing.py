@@ -64,8 +64,19 @@ def test_defaults_cage_opus_and_ignore_bedrock(policy_file):
     assert plug["id"] == "auto-router"
     assert plug["cost_tier"] == "high"                       # interactive default
     assert plug["excluded_models"] == OVER_DEFAULT_CEILING   # price ceiling, not a name list
-    assert kw["extra_body"]["provider"]["ignore"] == ["amazon-bedrock"]
+    assert "ignore" not in kw["extra_body"]["provider"]                # bedrock caches fine (2026-08-29 test)
     assert kw["extra_body"]["provider"]["data_collection"] == "deny"     # privacy default
+    assert kw["extra_body"]["provider"]["order"][:2] == ["anthropic", "openai"]   # caching providers first
+    assert kw["extra_body"]["provider"]["allow_fallbacks"] is True
+
+
+def test_prefer_providers_never_overrides_an_explicit_order(policy_file):
+    kw = rp.apply_routing_policy(_agent(), _kwargs(extra_body={"provider": {"order": ["together"], "allow_fallbacks": False}}))
+    assert kw["extra_body"]["provider"]["order"] == ["together"]
+    assert kw["extra_body"]["provider"]["allow_fallbacks"] is False
+    policy_file("prefer_providers: []\n")
+    kw = rp.apply_routing_policy(_agent(), _kwargs())
+    assert "order" not in kw["extra_body"]["provider"]
 
 
 def test_data_collection_is_configurable_and_policy_wins_on_merge(policy_file):
@@ -73,7 +84,7 @@ def test_data_collection_is_configurable_and_policy_wins_on_merge(policy_file):
     kw = rp.apply_routing_policy(_agent(), _kwargs(extra_body={"provider": {"data_collection": "deny", "order": ["x"]}}))
     assert kw["extra_body"]["provider"]["data_collection"] == "allow"
     assert kw["extra_body"]["provider"]["order"] == ["x"]
-    policy_file("data_collection: null\nignore_providers: []\n")
+    policy_file("data_collection: null\nignore_providers: []\nprefer_providers: []\n")
     kw = rp.apply_routing_policy(_agent(), _kwargs())
     assert "provider" not in kw["extra_body"]
 
@@ -127,7 +138,7 @@ def test_pinned_model_gets_provider_ignore_but_no_auto_router_plugin(policy_file
     kw = rp.apply_routing_policy(_agent(model="anthropic/claude-sonnet-5"),
                                  _kwargs(model="anthropic/claude-sonnet-5"))
     assert "plugins" not in kw["extra_body"]
-    assert kw["extra_body"]["provider"]["ignore"] == ["amazon-bedrock"]
+    assert kw["extra_body"]["provider"]["data_collection"] == "deny"
 
 
 def test_non_openrouter_route_untouched(policy_file):
@@ -182,7 +193,7 @@ def test_merge_keeps_existing_plugins_and_provider_prefs(policy_file):
     ids = [p["id"] for p in kw["extra_body"]["plugins"]]
     assert ids == ["web", "auto-router"]                 # ours replaced the stale one
     assert kw["extra_body"]["plugins"][1]["cost_tier"] == "high"
-    assert kw["extra_body"]["provider"] == {"order": ["anthropic"], "ignore": ["groq", "amazon-bedrock"], "data_collection": "deny"}
+    assert kw["extra_body"]["provider"] == {"order": ["anthropic"], "ignore": ["groq"], "data_collection": "deny"}
 
 
 def test_auto_escalation_steps_one_band_after_threshold(policy_file):
@@ -215,7 +226,7 @@ def test_explicit_override_is_not_escalated(policy_file):
 def test_describe_mentions_tier_ceiling_and_file(policy_file):
     text = rp.describe(_agent(platform="cron"))
     assert "tier: low" in text and "routing-policy.yaml" in text
-    assert "amazon-bedrock" in text and "Price ceiling: $3.0/M in" in text and "4 models excluded" in text
+    assert "Price ceiling: $3.0/M in" in text and "4 models excluded" in text and "z-ai" in text
     assert "claude-opus-5" in text
 
 

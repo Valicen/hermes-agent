@@ -21,13 +21,17 @@ model nobody chose. Three facts explain it:
    across the providers that serve it ("lowest-cost candidates, weighted by
    inverse square of price"). Sales, 75%-off providers, new entrants — all of
    that still applies to whatever model the router picks.
-3. **The Bedrock endpoint bills our prefix in full.** All $220 of Opus-5
-   went through `amazon-bedrock`, which returned **zero prompt-cache reads**.
-   Hermes does send Anthropic `cache_control` markers on `openrouter/auto`
-   (`anthropic_prompt_cache_policy`, `is_auto_router` branch) — the endpoint
-   simply doesn't honour them. Our shape is ~76k tokens of prefix per call
-   and ~360 tokens of output, with a 90% cache-hit rate elsewhere; losing the
-   cache is a 5–8× cost multiplier, far larger than any provider discount.
+3. **Caching is per provider, and the price sort ignores it.** Our shape is
+   ~76k tokens of prefix per call and ~360 tokens of output, with a 90%
+   cache-hit rate when caching works; losing the cache is a 5–8× cost
+   multiplier, far larger than any provider discount. Measured 2026-08-29
+   (two identical calls, `cached_tokens` on the second): Z.AI, Anthropic via
+   Google *and* via Bedrock, OpenInference/Novita/SiliconFlow (DeepSeek) all
+   cache; Io Net and DigitalOcean (cheap resellers the price sort likes)
+   return nothing. *Correction:* the first draft of this doc blamed
+   `amazon-bedrock` for "zero cache reads" — that came from unresolved
+   `openrouter/auto` accounting rows in the local DB, not from billing;
+   Bedrock caches normally and is no longer ignored.
 
 ## What OpenRouter lets us control per request (characterised live 2026-08-29)
 
@@ -36,7 +40,8 @@ model nobody chose. Three facts explain it:
 | `plugins: [{id: "auto-router", cost_tier: <band>}]` | Auto Router picks inside a cost band. **A band, not a ceiling**: models cheaper than the band are excluded too. | low→`deepseek-v4-flash`, medium→`glm-5.2`, high→`claude-sonnet-5`, xhigh→`kimi-k3`/`gpt-5.6-sol`, max→`claude-opus-5` (same prompt) |
 | `plugins[auto-router].excluded_models` (globs) | Router never picks these | `anthropic/claude-opus*` excluded at xhigh → `gpt-5.6-sol` |
 | `plugins[auto-router].allowed_models` (globs) | Router only picks these | `anthropic/*` → `claude-sonnet-5` |
-| `provider: {ignore: [...]}` | Endpoint never used, for any model | `amazon-bedrock` ignored → Sonnet served by Google Vertex |
+| `provider: {order: [...], allow_fallbacks: true}` | Try these providers first for whatever model is chosen | first-party-first order + auto medium → glm-5.2@Z.AI, cached on call 2; low → deepseek-flash@OpenInference, cached |
+| `provider: {ignore: [...]}` | Endpoint never used, for any model | works with auto; **default empty** (see correction above) |
 | `provider: {data_collection: "deny"}` | Excludes endpoints that may retain prompts/completions | every band and every model we use still served (sonnet-5→Google, glm-5.2→Makora, deepseek-flash→Reka, kimi-k3→Together); **on by default since 2026-08-29** |
 | `provider: {max_price: {...}}` | Applied **after** the model choice; if the chosen model's endpoints all exceed it the request **fails** (`404 No endpoints found that satisfy the max price`) | **Not used** — it fails instead of degrading |
 
@@ -59,8 +64,10 @@ right after `_build_api_kwargs`, before request middleware):
 4. **Emit** `plugins[auto-router]` (only when the model is `openrouter/auto`;
    a pinned model gets no plugin) with `cost_tier`, `allowed_models`, the
    **price-ceiling exclusion list** (see below; unless the tier reached
-   `ceiling_lifted_at`), and `provider.ignore` + `provider.data_collection`
-   for *every* OpenRouter model.
+   `ceiling_lifted_at`), and `provider.order` (caching providers first),
+   `provider.data_collection`, `provider.ignore` for *every* OpenRouter model.
+   An explicit provider order already on the request (config.yaml
+   `provider_routing`, `/model --provider`) is left alone.
    Existing `plugins` / `provider` entries in the request are merged, not
    clobbered.
 5. **Log** one INFO line per session (and again whenever the decision
@@ -158,6 +165,7 @@ Ordered from fastest/most local to most global. All are reversible.
 | Opus/GPT-5.5 allowed but not Fable/pro tiers | `price_ceiling.prompt: 6` in the file | fleet (or per profile) | next call |
 | No ceiling at all | `price_ceiling: {prompt: null, completion: null}` | fleet / profile | next call |
 | Back to OpenRouter's full provider pool (privacy off) | `data_collection: allow` | fleet / profile | next call |
+| Pure price-weighted provider choice (sales first, caching be damned) | `prefer_providers: []` | fleet / profile | next call |
 | Automation allowed to reach premium models | `escalation.max_auto_tier: max` | fleet / profile | next call |
 | One process pinned regardless of file | `HERMES_ROUTING_TIER=xhigh` in that profile's `.env` | that profile's gateway | restart that gateway |
 | Everything off, exactly the old behaviour | `enabled: false` in the file, **or** `HERMES_ROUTING_POLICY=off` in a profile's `.env` | fleet / one profile | next call / restart |
