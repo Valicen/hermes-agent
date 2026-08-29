@@ -401,6 +401,25 @@ def classify_session(agent: Any) -> str:
     return klass
 
 
+_CRON_SID_RE = __import__("re").compile(r"^cron_([0-9a-f]{6,})_")
+
+
+def work_unit(agent: Any) -> Tuple[Optional[str], Optional[str]]:
+    """``("cron", job_id)`` / ``("kanban", task_id)`` / ``(None, None)``.
+
+    Cron sessions are named ``cron_<job id>_<stamp>``; kanban workers carry
+    ``HERMES_KANBAN_TASK``. Used for per-unit band pins and the ledger.
+    """
+    task = os.environ.get("HERMES_KANBAN_TASK")
+    if task:
+        return "kanban", task.strip()
+    sid = str(getattr(agent, "session_id", "") or "")
+    m = _CRON_SID_RE.match(sid)
+    if m:
+        return "cron", m.group(1)
+    return None, None
+
+
 def resolve_tier(agent: Any, policy: Dict[str, Any]) -> Tuple[Optional[str], str]:
     """Return ``(tier, source)``. ``tier`` is None when the router should pick
     freely inside the cage (``auto``)."""
@@ -414,6 +433,17 @@ def resolve_tier(agent: Any, policy: Dict[str, Any]) -> Tuple[Optional[str], str
         if norm is not None:
             return (None if norm == "auto" else norm), "env HERMES_ROUTING_TIER"
     klass = classify_session(agent)
+    # Loop hooks (2026-08-29): a band pinned to ONE cron job or ONE kanban
+    # task by the trust-ladder / escalation-by-outcome scripts. Keys live in
+    # routing-policy.yaml under ``cron_jobs.<job id>`` / ``kanban_tasks.<task id>``.
+    unit_kind, unit_id = work_unit(agent)
+    if unit_kind and unit_id:
+        table = policy.get("cron_jobs" if unit_kind == "cron" else "kanban_tasks") or {}
+        pinned = table.get(unit_id) if isinstance(table, dict) else None
+        if pinned is not None:
+            norm = normalize_tier(pinned)
+            if norm is not None:
+                return (None if norm == "auto" else norm), f"{unit_kind} {unit_id} pinned by loop"
     base = normalize_tier((policy.get("tiers") or {}).get(klass))
     if base is None or base == "auto":
         tier = None
@@ -577,10 +607,44 @@ def apply_routing_policy(agent: Any, api_kwargs: Dict[str, Any]) -> Dict[str, An
                 _ex_text, ",".join(snapshot["ignore"]) or "-", snapshot["data_collection"] or "-",
                 api_kwargs.get("model"),
             )
+        if getattr(agent, "_routing_last", None) != snapshot:
+            _write_ledger(agent, snapshot, api_kwargs.get("model"))
         agent._routing_last = snapshot
     except Exception:
         pass
     return api_kwargs
+
+
+def ledger_path() -> Path:
+    override = os.environ.get("HERMES_ROUTING_LEDGER")
+    return Path(override).expanduser() if override else fleet_root() / "logs" / "routing-ledger.jsonl"
+
+
+def _write_ledger(agent: Any, snapshot: Dict[str, Any], model: Any) -> None:
+    """Append one JSON line per routing decision (first call of a session and
+    every change — escalations, /tier). Durable input for the loop scripts:
+    agent logs rotate within a day, this file does not. Never raises."""
+    try:
+        import json
+        unit_kind, unit_id = work_unit(agent)
+        row = {
+            "at": time.time(),
+            "profile": current_profile_name(),
+            "session_id": str(getattr(agent, "session_id", "") or ""),
+            "platform": str(getattr(agent, "platform", "") or ""),
+            "class": snapshot.get("class"),
+            "unit_kind": unit_kind, "unit_id": unit_id,
+            "tier": snapshot.get("tier") or "auto",
+            "source": snapshot.get("source"),
+            "escalation_steps": int(getattr(agent, "_routing_escalation", 0) or 0),
+            "model": str(model or ""),
+        }
+        path = ledger_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except Exception as exc:
+        logger.debug("routing ledger: skipped (%s)", exc)
 
 
 # ---------------------------------------------------------------------------

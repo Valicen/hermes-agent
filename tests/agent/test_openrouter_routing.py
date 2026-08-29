@@ -265,3 +265,30 @@ def test_stale_catalogue_is_served_and_refreshed_in_background(policy_file, monk
         if json.loads(cat.read_text())["fetched_at"] > 1.0: break
         __import__("time").sleep(0.05)
     assert json.loads(cat.read_text())["fetched_at"] > 1.0             # refreshed on disk
+
+
+def test_cron_job_and_kanban_task_pins_beat_class_default(policy_file, monkeypatch):
+    policy_file("cron_jobs:\n  a73736ac63b6: low\nkanban_tasks:\n  t_abc123: xhigh\ntiers:\n  cron: medium\n")
+    cron = _agent(platform="cron"); cron.session_id = "cron_a73736ac63b6_20260829_050000"
+    assert rp.resolve_tier(cron, rp.effective_policy())[0] == "low"
+    other = _agent(platform="cron"); other.session_id = "cron_ffffffffffff_20260829_050000"
+    assert rp.resolve_tier(other, rp.effective_policy())[0] == "medium"
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
+    tier, source = rp.resolve_tier(_agent(), rp.effective_policy())
+    assert tier == "xhigh" and "pinned by loop" in source
+    agent = _agent(); agent._routing_tier_override = "low"          # explicit session override still wins
+    assert rp.resolve_tier(agent, rp.effective_policy())[0] == "low"
+
+
+def test_ledger_records_decisions(policy_file, monkeypatch, tmp_path):
+    ledger = tmp_path / "ledger.jsonl"
+    monkeypatch.setenv("HERMES_ROUTING_LEDGER", str(ledger))
+    import json
+    agent = _agent(platform="cron"); agent.session_id = "cron_a73736ac63b6_20260829_050000"
+    rp.apply_routing_policy(agent, _kwargs()); rp.apply_routing_policy(agent, _kwargs())   # second call: no change, no row
+    rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+    assert len(rows) == 1 and rows[0]["unit_kind"] == "cron" and rows[0]["unit_id"] == "a73736ac63b6" and rows[0]["tier"] == "low"
+    rp.note_failure(agent, "api_error"); rp.note_failure(agent, "api_error")
+    rp.apply_routing_policy(agent, _kwargs())
+    rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+    assert len(rows) == 2 and rows[1]["tier"] == "medium" and rows[1]["escalation_steps"] == 1
