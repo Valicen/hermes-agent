@@ -534,6 +534,7 @@ class CLISessionMixin:
         # into the next session (#48055, #23131).
         self._pending_one_turn_model_restore = None
         self.service_tier = _parse_service_tier_config(CLI_CONFIG["agent"].get("service_tier", ""))
+        self.routing_tier = None  # Talaria /tier is session-scoped: /new drops it
         _reset_model_to_config_default(self, silent)
         _sync_process_session_id(self.session_id)
 

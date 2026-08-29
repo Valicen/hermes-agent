@@ -217,6 +217,21 @@ class GatewayConfigLoadersMixin:
             _SERVICE_TIER_UNSET if clear else service_tier
         )
 
+    def _resolve_session_routing_tier(self, session_key: Optional[str]) -> Optional[str]:
+        """Talaria row 12: the session's /tier override (tier string or "auto"), or None."""
+        if not session_key:
+            return None
+        _t_state = self._peek_session_state(session_key)
+        if _t_state is None:
+            return None
+        return _t_state.conversation.routing_tier_override
+
+    def _set_session_routing_tier_override(self, session_key: str, tier: Optional[str]) -> None:
+        """Talaria row 12: set (or clear with None) the session's /tier override."""
+        if not session_key:
+            return
+        self._session_state(session_key).conversation.routing_tier_override = tier
+
     @classmethod
     def _load_service_tier(cls) -> str | None:
         """``agent.service_tier``: fast/priority/on => "priority"; normal/off => None; None when unset/unknown."""

@@ -42,6 +42,7 @@ class ConversationState:
     one_turn_restore: Optional[Dict[str, Any]] = None  # /model --once snapshot
     reasoning_override: Optional[Dict[str, Any]] = None  # /reasoning override
     service_tier_override: Any = _UNSET_TIER  # /fast: "priority" or None; _UNSET_TIER = absent
+    routing_tier_override: Optional[str] = None  # Talaria /tier: tier string or "auto"; None = absent
     last_resolved_model: str = ""  # last successfully-resolved non-empty model
     queued_events: List[Any] = field(default_factory=list)  # /queue overflow FIFO (head in adapter)
     sidecar_notes: List[str] = field(default_factory=list)  # one-shot must-deliver notes
@@ -222,6 +223,7 @@ LEGACY_FIELD_SPECS: Dict[str, _FieldSpec] = {
     "_pending_one_turn_model_restores": _spec("conversation", "one_turn_restore", None),
     "_session_reasoning_overrides": _spec("conversation", "reasoning_override", None),
     "_session_service_tier_overrides": _spec("conversation", "service_tier_override", _UNSET_TIER),
+    "_session_routing_tier_overrides": _spec("conversation", "routing_tier_override", None),
     "_last_resolved_model": _spec("conversation", "last_resolved_model", str),
     "_queued_events": _spec("conversation", "queued_events", list),
     "_pending_turn_sidecar_notes": _spec("conversation", "sidecar_notes", list),

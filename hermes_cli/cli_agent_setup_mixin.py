@@ -585,6 +585,9 @@ class CLIAgentSetupMixin:
             if _auto_result is not None:
                 self.agent._auto_load_skills_result = _auto_result
                 self.agent._auto_load_skills_resolved = True
+            # Talaria row 12: carry the /tier session override onto the fresh agent.
+            if getattr(self, "routing_tier", None) is not None:
+                self.agent._routing_tier_override = self.routing_tier
             # Route agent status output through prompt_toolkit so ANSI escapes aren't garbled by
             # patch_stdout's StdoutProxy (#2262), holding lines while a response box streams so a
             # subagent/background completion notice never splits the reply mid-paragraph.

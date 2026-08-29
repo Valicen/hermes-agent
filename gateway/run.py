@@ -2213,6 +2213,7 @@ _CONVERSATION_SCOPED_STATE: tuple = (
     "_pending_one_turn_model_restores",
     "_session_reasoning_overrides",
     "_session_service_tier_overrides",
+    "_session_routing_tier_overrides",
     "_pending_model_notes",
     "_last_resolved_model",
     "_queued_events",
@@ -3349,6 +3350,7 @@ class GatewayRunner(
     _pending_one_turn_model_restores = legacy_dict_property("_pending_one_turn_model_restores")
     _session_reasoning_overrides = legacy_dict_property("_session_reasoning_overrides")
     _session_service_tier_overrides = legacy_dict_property("_session_service_tier_overrides")
+    _session_routing_tier_overrides = legacy_dict_property("_session_routing_tier_overrides")
     _last_resolved_model = legacy_dict_property("_last_resolved_model")
     _queued_events = legacy_dict_property("_queued_events")
     _pending_turn_sidecar_notes = legacy_dict_property("_pending_turn_sidecar_notes")

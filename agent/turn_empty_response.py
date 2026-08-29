@@ -56,6 +56,11 @@ def _retry_empty(
         _empty_guard.record_empty_attempt(
             agent, finish_reason=finish_reason, response=response, observed_generation=observed_generation,
         )
+        try:  # Talaria row 12: empty responses count toward routing auto-escalation.
+            from agent.openrouter_routing import note_failure as _routing_note_failure
+            _routing_note_failure(agent, "empty_response")
+        except Exception:
+            pass
     budget = (
         _empty_guard.empty_retry_budget(agent, response)
         if empty_candidate else _empty_guard.DEFAULT_EMPTY_RETRY_BUDGET

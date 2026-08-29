@@ -2797,6 +2797,8 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
             else:
                 self.reasoning_config = _cli_reasoning
         self.service_tier = _parse_service_tier_config(CLI_CONFIG["agent"].get("service_tier", ""))
+        # Talaria /tier session override (None = policy default).
+        self.routing_tier = None
 
         pr = CLI_CONFIG.get("provider_routing", {}) or {}
         self._provider_sort = pr.get("sort")

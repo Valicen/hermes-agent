@@ -59,6 +59,13 @@ def handle_api_error(
     the retry loop with ``restart_with_rebuilt_messages`` armed (``"break"``) so the pre-API
     preflight re-runs against the fallback's context window (#84733)."""
     _provider_overflow_recovery_pending = False
+    # Talaria row 12: repeated API errors in one session step the routing tier up
+    # (docs/routing-policy.md, "automatic escalation").
+    try:
+        from agent.openrouter_routing import note_failure as _routing_note_failure
+        _routing_note_failure(agent, "api_error")
+    except Exception:
+        pass
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ApiErrorVerdict:
         return ApiErrorVerdict(

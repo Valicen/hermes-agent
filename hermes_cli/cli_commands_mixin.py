@@ -2605,6 +2605,47 @@ class CLICommandsMixin:
         _persist_display_choice("display.tui_status_indicator", arg, "Busy-indicator style",
                                 "The TUI picks up the new style on its next render.")
 
+    def _handle_tier_command(self, cmd: str):
+        """Handle /tier — OpenRouter routing tier for this session (Talaria row 12).
+
+        ``/tier`` or ``/tier status`` shows the effective policy; ``/tier
+        low|medium|high|xhigh|max`` pins the auto-router cost band for the rest of this
+        session; ``/tier auto`` keeps the cage but lets the router pick freely inside it;
+        ``/tier reset`` drops the override. ``max`` lifts the exclusion cage (Opus becomes
+        eligible). Session-only by design — the durable knobs live in routing-policy.yaml.
+        """
+        from cli import _ACCENT, _DIM, _RST, _cprint
+        from agent.openrouter_routing import TIERS, TIER_GUIDE, describe, normalize_tier
+
+        agent = getattr(self, "agent", None)
+        parts = cmd.strip().split(maxsplit=1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else ""
+        if not arg or arg == "status":
+            probe = agent if agent is not None else type("_P", (), {"provider": "openrouter", "platform": "cli"})()
+            if agent is None and getattr(self, "routing_tier", None) is not None:
+                probe._routing_tier_override = self.routing_tier
+            for line in describe(probe).splitlines():
+                _cprint(f"  {_DIM}{line}{_RST}")
+            return
+        if arg == "reset":
+            self.routing_tier = None
+            if agent is not None:
+                agent._routing_tier_override = None
+                agent._routing_escalation = 0
+                agent._routing_failures = 0
+            _cprint(f"  {_ACCENT}✓ Routing tier override cleared (policy default applies){_RST}")
+            return
+        tier = normalize_tier(arg)
+        if tier is None:
+            _cprint(f"  {_DIM}(._.) Unknown tier: {arg}. Use one of {', '.join(TIERS)}, auto, reset, status.{_RST}")
+            return
+        self.routing_tier = tier
+        if agent is not None:
+            agent._routing_tier_override = tier
+        note = " — price ceiling lifted: premium models (Opus, Fable, GPT-5.5 …) become eligible" if tier == "max" else ""
+        _cprint(f"  {_ACCENT}✓ Routing tier set to {tier} for this session{note}{_RST}")
+        _cprint(f"  {_DIM}{TIER_GUIDE.get(tier, 'router picks freely under the price ceiling')}{_RST}")
+
     def _handle_fast_command(self, cmd: str):
         """Handle /fast — toggle fast mode (OpenAI Priority Processing / Anthropic Fast Mode).
         Session-scoped by default; ``--global`` persists agent.service_tier to config.yaml

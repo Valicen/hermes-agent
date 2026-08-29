@@ -700,6 +700,38 @@ class GatewayModelCommandsMixin:
         self._evict_cached_agent(session_key)
         return t("gateway.fast.session_only", label=label)
 
+    async def _handle_tier_command(self, event: MessageEvent) -> str:
+        """Handle /tier — OpenRouter routing tier for this chat session (Talaria row 12).
+
+        Session-scoped only (cleared by /new). ``max`` lifts the exclusion cage so Opus
+        becomes eligible; ``auto`` keeps the cage but lets the router choose inside it;
+        ``reset`` returns to the policy default. Durable knobs live in routing-policy.yaml —
+        see docs/routing-policy.md.
+        """
+        from agent.openrouter_routing import TIERS, TIER_GUIDE, describe, normalize_tier
+
+        arg = event.get_command_args().strip().lower()
+        session_key = self._session_key_for_source(event.source)
+        current = self._resolve_session_routing_tier(session_key)
+
+        if not arg or arg == "status":
+            probe = type("_P", (), {"provider": "openrouter", "platform": "gateway"})()
+            if current is not None:
+                probe._routing_tier_override = current
+            return describe(probe)
+        if arg == "reset":
+            self._set_session_routing_tier_override(session_key, None)
+            self._evict_cached_agent(session_key)
+            return "✓ Routing tier override cleared — policy default applies to this session."
+        tier = normalize_tier(arg)
+        if tier is None:
+            return f"Unknown tier: {arg}. Use one of {', '.join(TIERS)}, auto, reset, status."
+        self._set_session_routing_tier_override(session_key, tier)
+        self._evict_cached_agent(session_key)
+        note = " — price ceiling lifted: premium models (Opus, Fable, GPT-5.5 …) become eligible" if tier == "max" else ""
+        guide = TIER_GUIDE.get(tier, "router picks freely under the price ceiling")
+        return f"✓ Routing tier set to {tier} for this session{note}.\n{guide}"
+
     async def _handle_fast_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /fast — the CLI Priority Processing toggle; session-scoped unless ``--global``
         (persists agent.service_tier, parity with /model)."""

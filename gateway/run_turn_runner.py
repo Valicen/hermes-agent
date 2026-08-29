@@ -1831,6 +1831,10 @@ class TurnRunner:
         agent, reused_cached_agent = self._resolve_turn_agent(
             turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
         )
+        # Talaria row 12: the session /tier override rides onto every (re)built agent.
+        _routing_tier = runner._resolve_session_routing_tier(ctx.session_key)
+        if _routing_tier is not None:
+            agent._routing_tier_override = _routing_tier
         self._wire_turn_agent_callbacks(agent, turn_route, reasoning_config, stream_delta_cb, interim_cb, want_interim)
         agent_history, observed_group_context, history_media_paths = self._load_turn_history(agent, reused_cached_agent)
         persist_msg, persist_ts = self._prepare_turn_message(agent_history)
