@@ -2626,6 +2626,17 @@ def cmd_dashboard(args):
     _ssh_session_token = _read_ssh_session_token_file(_token_file) if _token_file else None
     _mcp_discovery_after_bind = _dashboard_prepare_runtime(args, _headless_backend)
 
+    # Talaria #16: browser chats are hosted HERE for every profile, and a
+    # kanban task settling between turns has no live socket to notify. Start
+    # the process-level orphan notifier at boot (ws.py also starts it on the
+    # first client connect; idempotent).
+    try:
+        from tui_gateway import server as _tui_server
+
+        _tui_server._start_orphan_kanban_notifier()
+    except Exception:
+        logger.debug("orphan kanban notifier start failed", exc_info=True)
+
     from hermes_cli.web_server import start_server
 
     # Interactive auth setup: if this bind will engage the auth gate but no
