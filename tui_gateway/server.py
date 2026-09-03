@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -3285,6 +3286,275 @@ _paste_counter = 0
 
 # mcp.servers.* handlers (methods_tools) resolve this BARE through this namespace.
 from .mcp_rpc_helpers import summarize_server as _mcp_summarize_server  # noqa: E402, F401
+
+
+# ---------------------------------------------------------------------------
+# Orphan kanban notifications (Talaria row 16, PR candidate)
+#
+# The per-session poller above only runs while a TUI/browser session holds a
+# live socket. Argus opens a socket per send and closes it when the turn ends,
+# so a task that settles between turns has nobody polling its subscription: the
+# cursor stays on the creation event and "I'll report back when it's done"
+# never happens (t_5733e873, 2026-09-03 — three Chief-of-Staff subs since 08-24
+# never advanced). This process-level poller claims those events for THIS
+# profile's sessions that are not live and delivers them as a headless resumed
+# turn (`hermes -p <profile> chat --resume <session> -Q -q <text>`), which
+# appends to the same session store the gateway reads, so the agent's report
+# is in the transcript the next time the chat is opened.
+# ---------------------------------------------------------------------------
+
+_ORPHAN_KANBAN_POLL_S = float(os.environ.get("HERMES_TUI_ORPHAN_NOTIFY_POLL_S") or 20.0)
+_ORPHAN_KANBAN_TURN_TIMEOUT_S = float(os.environ.get("HERMES_TUI_ORPHAN_NOTIFY_TIMEOUT_S") or 900.0)
+# Events older than this are claimed but not delivered: waking a chat to
+# report on a task that settled days ago is noise, not a report-back. Covers
+# the first start after this shipped (three stale Chief-of-Staff subs).
+_ORPHAN_KANBAN_MAX_AGE_S = float(os.environ.get("HERMES_TUI_ORPHAN_NOTIFY_MAX_AGE_S") or 48 * 3600.0)
+_orphan_notify_inflight: set = set()
+_orphan_notify_lock = threading.Lock()
+_orphan_notifier_started = False
+
+
+def _live_tui_session_keys() -> set:
+    """Session keys currently served by a live per-session poller."""
+    keys: set = set()
+    with _sessions_lock:
+        for sess in _sessions.values():
+            if sess.get("_finalized"):
+                continue
+            key = str(sess.get("session_key") or "")
+            if key:
+                keys.add(key)
+    return keys
+
+
+def _collect_orphan_kanban_notifications() -> dict:
+    """Claim unseen terminal events for this profile's tui subscriptions whose
+    session has no live socket. Returns ``{session_key: [(text, sub, old_cursor)]}``.
+
+    Live sessions are skipped (their own poller claims within seconds); the
+    cursor claim is atomic, so a session that goes live mid-poll cannot be
+    delivered twice.
+    """
+    try:
+        from hermes_cli import kanban_db as _kb
+        from hermes_cli import kanban_db_connect as _kbc
+        from hermes_cli import kanban_db_notify as _kbn
+    except Exception:
+        return {}
+    # Browser sessions are hosted by the dashboard process for EVERY profile
+    # (hermes_cli/main.py: tui_gateway.ws → server._make_agent), so the
+    # subscription's own notifier_profile — not this process's profile —
+    # names the agent that must answer. Claims are atomic, so a second host
+    # (desktop TUI, a profile gateway) racing on the same board is safe.
+    live = _live_tui_session_keys()
+    out: dict = {}
+    try:
+        boards = _kb.list_boards(include_archived=False)
+    except Exception:
+        try:
+            boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+        except Exception:
+            return {}
+    seen_db_paths: set = set()
+    for board_meta in boards:
+        slug = (board_meta or {}).get("slug") or _kb.DEFAULT_BOARD
+        db_path = (board_meta or {}).get("db_path")
+        try:
+            resolved = (
+                str(Path(db_path).expanduser().resolve())
+                if db_path else str(_kb.kanban_db_path(slug).resolve())
+            )
+        except Exception:
+            resolved = f"slug:{slug}"
+        if resolved in seen_db_paths:
+            continue
+        seen_db_paths.add(resolved)
+        try:
+            if _kbn.count_notify_subs(board=slug, platform="tui") == 0:
+                continue
+        except Exception:
+            pass
+        try:
+            conn = _kbc.connect(board=slug)
+        except Exception:
+            continue
+        try:
+            try:
+                subs = _kbn.list_notify_subs(conn)
+            except Exception:
+                continue
+            for sub in subs:
+                if (sub.get("platform") or "").lower() != "tui":
+                    continue
+                key = str(sub.get("chat_id") or "")
+                if not key or key in live:
+                    continue
+                with _orphan_notify_lock:
+                    if key in _orphan_notify_inflight:
+                        continue
+                old, _new, events = _kbn.claim_unseen_events_for_sub(
+                    conn,
+                    task_id=sub["task_id"],
+                    platform=sub["platform"],
+                    chat_id=sub["chat_id"],
+                    thread_id=sub.get("thread_id") or "",
+                    kinds=_KANBAN_NOTIFY_KINDS,
+                )
+                if not events:
+                    continue
+                task = _kb.get_task(conn, sub["task_id"])
+                newest = max((int(getattr(ev, "created_at", 0) or 0) for ev in events), default=0)
+                if newest and time.time() - newest > _ORPHAN_KANBAN_MAX_AGE_S:
+                    logger.info(
+                        "tui orphan notifier: dropping %d stale event(s) for %s (session %s, newest %.0fh old)",
+                        len(events), sub["task_id"], key, (time.time() - newest) / 3600.0,
+                    )
+                    continue
+                texts = []
+                for ev in events:
+                    text = _format_kanban_event_text(sub, task, ev, slug)
+                    if text:
+                        texts.append(text)
+                if not texts:
+                    continue
+                sub_copy = dict(sub)
+                sub_copy["board"] = slug
+                out.setdefault(key, []).append(("\n".join(texts), sub_copy, int(old), int(_new)))
+                if task and getattr(task, "status", "") == "archived":
+                    try:
+                        _kbn.remove_notify_sub(
+                            conn, task_id=sub["task_id"], platform=sub["platform"],
+                            chat_id=sub["chat_id"], thread_id=sub.get("thread_id") or "",
+                        )
+                    except Exception:
+                        pass
+        finally:
+            conn.close()
+    return out
+
+
+def _orphan_notify_argv(profile: str, session_key: str, text: str) -> Optional[list]:
+    try:
+        from gateway.run import _resolve_hermes_bin
+        base = _resolve_hermes_bin()
+    except Exception:
+        base = None
+    if not base:
+        exe = shutil.which("hermes")
+        if not exe:
+            return None
+        base = [exe]
+    return list(base) + [
+        "-p", profile, "chat", "--resume", session_key, "-Q", "--accept-hooks", "-q", text,
+    ]
+
+
+def _deliver_orphan_kanban_notification(session_key: str, batch: list) -> bool:
+    """Run one headless resumed turn carrying every claimed text for this
+    session. On failure the cursors are rewound so the next tick retries."""
+    try:
+        from hermes_cli import kanban_db_connect as _kbc
+        from hermes_cli import kanban_db_notify as _kbn
+    except Exception:
+        return False
+    profile = str((batch[0][1].get("notifier_profile") if batch else "") or "default").strip()
+    text = "\n".join(item[0] for item in batch)
+    prompt = (
+        "[kanban notification — delivered while this chat was idle]\n" + text
+        + "\n\nYou promised to report back on this. Verify the outcome on the board "
+        "(kanban_show) and give the requester a short, evidence-led status: what landed, "
+        "ids/receipts, anything still open. Do not re-dispatch work that already exists."
+    )
+    argv = _orphan_notify_argv(profile, session_key, prompt)
+    ok = False
+    if argv:
+        env = dict(os.environ)
+        env["HERMES_KANBAN_NOTIFY_RESUME"] = "1"
+        try:
+            proc = subprocess.run(
+                argv, env=env, capture_output=True, text=True,
+                timeout=_ORPHAN_KANBAN_TURN_TIMEOUT_S, check=False,
+            )
+            ok = proc.returncode == 0
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] if not ok else []
+            (logger.info if ok else logger.warning)(
+                "tui orphan notifier: %s headless turn for session %s (%d event batch%s)%s",
+                "delivered" if ok else "FAILED", session_key, len(batch),
+                "" if len(batch) == 1 else "es",
+                "" if ok else f": rc={proc.returncode} {tail}",
+            )
+        except Exception as exc:
+            logger.warning("tui orphan notifier: headless turn crashed for %s: %s", session_key, exc)
+    else:
+        logger.warning("tui orphan notifier: no hermes executable found; leaving events for retry")
+    if not ok:
+        for _text, sub, old, claimed in batch:
+            try:
+                board = sub.get("board") or None
+                conn = _kbc.connect(board=board) if board else _kbc.connect()
+                try:
+                    _kbn.rewind_notify_cursor(
+                        conn, task_id=sub["task_id"], platform=sub["platform"],
+                        chat_id=sub["chat_id"], thread_id=sub.get("thread_id") or "",
+                        claimed_cursor=claimed, old_cursor=old,
+                    )
+                finally:
+                    conn.close()
+            except Exception:
+                logger.debug("tui orphan notifier: cursor rewind failed", exc_info=True)
+    return ok
+
+
+def _orphan_kanban_notify_tick() -> int:
+    """One poll: claim + deliver (each session in its own thread). Returns the
+    number of sessions dispatched."""
+    pending = _collect_orphan_kanban_notifications()
+    dispatched = 0
+    for key, batch in pending.items():
+        with _orphan_notify_lock:
+            if key in _orphan_notify_inflight:
+                continue
+            _orphan_notify_inflight.add(key)
+
+        def _run(k=key, b=batch):
+            try:
+                _deliver_orphan_kanban_notification(k, b)
+            finally:
+                with _orphan_notify_lock:
+                    _orphan_notify_inflight.discard(k)
+
+        threading.Thread(target=_run, name=f"tui-orphan-notify-{key[-6:]}", daemon=True).start()
+        dispatched += 1
+    return dispatched
+
+
+def _orphan_kanban_notify_loop(stop_event: threading.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            _orphan_kanban_notify_tick()
+        except Exception:
+            logger.debug("tui orphan notifier: tick failed", exc_info=True)
+        stop_event.wait(_ORPHAN_KANBAN_POLL_S)
+
+
+def _start_orphan_kanban_notifier() -> None:
+    """Start the process-level poller once per gateway process. Disabled with
+    ``HERMES_TUI_ORPHAN_NOTIFY=0`` (or a non-positive poll interval)."""
+    global _orphan_notifier_started
+    if _orphan_notifier_started:
+        return
+    if str(os.environ.get("HERMES_TUI_ORPHAN_NOTIFY", "1")).strip().lower() in ("0", "false", "no", "off"):
+        return
+    if _ORPHAN_KANBAN_POLL_S <= 0:
+        return
+    _orphan_notifier_started = True
+    stop_event = threading.Event()
+    atexit.register(stop_event.set)
+    threading.Thread(
+        target=_orphan_kanban_notify_loop, args=(stop_event,),
+        name="tui-orphan-kanban-notifier", daemon=True,
+    ).start()
+    logger.info("tui orphan notifier: started (poll=%.0fs)", _ORPHAN_KANBAN_POLL_S)
 
 
 # ── Split @method handler modules (see method_ctx.py): imported last so every global the handlers close
