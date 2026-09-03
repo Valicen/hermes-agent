@@ -198,6 +198,9 @@ def specify_task(
     task, reason = _load_triage_task(task_id)
     if task is None:
         return SpecifyOutcome(task_id, False, reason)
+    with kbc.connect_closing() as conn:  # Talaria row 15
+        if kb.loop_parked(conn, task_id):
+            return SpecifyOutcome(task_id, False, "loop-parked: block-loop breaker is holding this card for a human comment")
 
     raw, reason = _call_aux(
         "specify", task_id, aux_task="triage_specifier", system=_SYSTEM_PROMPT,
@@ -237,4 +240,5 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Task ids in the triage column; ``tenant`` narrows the sweep."""
     with kbc.connect_closing() as conn:
         tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
-    return [t.id for t in tasks]
+        # Talaria row 15: loop-parked cards wait for a human comment.
+        return [t.id for t in tasks if not kb.loop_parked(conn, t.id)]

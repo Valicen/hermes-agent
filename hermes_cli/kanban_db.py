@@ -1730,7 +1730,73 @@ def task_graph_context(conn: sqlite3.Connection, task_id: str) -> dict:
 
 # --- Comments & events ---
 
-def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str) -> int:
+
+# ---------------------------------------------------------------------------
+# Comments & events
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Loop-breaker parking (Talaria #15)
+# ---------------------------------------------------------------------------
+
+_AUTOMATION_AUTHORS = {"worker", "auto-decomposer", "loop-breaker", "triage-specifier", "system", "specifier", "decomposer"}
+
+
+def _is_automation_author(author: str, assignee: Optional[str] = None) -> bool:
+    """True for authors that are agents/automation rather than a human.
+
+    Profile names (a directory under ``$HERMES_HOME/profiles``) and the task's
+    assignee count as automation; everything else (``david``, ``user``) is a
+    human and releases a loop-parked card.
+    """
+    a = (author or "").strip().lower()
+    if not a or a in _AUTOMATION_AUTHORS or (assignee and a == assignee.strip().lower()):
+        return True
+    try:
+        return (boards_root().parent.parent / "profiles" / a).is_dir()
+    except Exception:
+        return False
+
+
+def loop_parked(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when the block-loop breaker parked this card in ``triage`` and no
+    human has weighed in since.
+
+    The breaker routes a card to ``triage`` "for a human-in-the-loop
+    decision", but ``triage`` is also the column the auto-specifier and
+    auto-decomposer sweep — so without this guard an LLM re-promotes the card
+    within a tick and the worker re-blocks it (t_a169ceb8: 25 cycles in
+    25 minutes, 2026-09-03). A comment from a non-automation author posted
+    after the ``block_loop_detected`` event is the release: the specifier may
+    then promote the card and the worker sees the human's answer.
+    """
+    row = conn.execute(
+        "SELECT status, assignee FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if row is None or row["status"] != "triage":
+        return False
+    ev = conn.execute(
+        "SELECT created_at FROM task_events WHERE task_id = ? AND kind = 'block_loop_detected' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if ev is None:
+        return False
+    # Was the card re-promoted/specified by something AFTER the loop event
+    # and then re-parked? Only the latest parking matters — handled by the
+    # ORDER BY above. Now look for a human comment since then.
+    for c in conn.execute(
+        "SELECT author FROM task_comments WHERE task_id = ? AND created_at >= ? ORDER BY id",
+        (task_id, int(ev["created_at"])),
+    ):
+        if not _is_automation_author(c["author"], row["assignee"]):
+            return False
+    return True
+
+
+def add_comment(
+    conn: sqlite3.Connection, task_id: str, author: str, body: str
+) -> int:
     if not body or not body.strip():
         raise ValueError("comment body is required")
     if not author or not author.strip():
@@ -3101,6 +3167,17 @@ def block_task(
             conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
         )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
+        if event_kind == "block_loop_detected":
+            # Talaria row 15: visible marker for humans/Argus, and the contract for the
+            # auto-specifier/decomposer guard (``loop_parked``).
+            add_comment(
+                conn, task_id, "loop-breaker",
+                f"LOOP BREAKER | parked in triage after {payload.get('recurrences')} re-blocks "
+                f"(kind={payload.get('kind') or 'generic'}). Auto-specify and auto-decompose skip this card "
+                "until a human comments here; that comment releases it (the specifier then "
+                "promotes it and the worker reads the answer). Last reason: "
+                + str(payload.get("reason") or "").strip()[:400],
+            )
         blocked_task = get_task(conn, task_id)
         if kind == "dependency":
             # Historical ordering: the dependency lane fires inside the txn.

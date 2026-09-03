@@ -26,7 +26,7 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    kbc.init_db()
     return home
 
 
@@ -139,3 +139,67 @@ def test_cli_specify_tenant_filter(kanban_home, capsys):
         assert kb.get_task(conn, inside).status in {"todo", "ready"}
 
 
+
+
+# ---------------------------------------------------------------------------
+# Loop-breaker parking (Talaria #15): the auto-specifier/decomposer must not
+# re-promote a card the block-loop breaker parked in triage until a human
+# comments on it.
+# ---------------------------------------------------------------------------
+
+
+def _park_via_loop_breaker(tid: str) -> None:
+    """Drive a card through the breaker: pretend it was unblocked once already
+    (recurrences at limit-1) and re-block it for the same kind."""
+    with kbc.connect_closing() as conn:
+        with kbc.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='ready', block_kind='needs_input', "
+                "block_recurrences=? WHERE id=?",
+                (kb.BLOCK_RECURRENCE_LIMIT - 1, tid),
+            )
+        assert kb.block_task(conn, tid, reason="need David's (a)/(b)", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+
+
+def test_loop_parked_card_is_skipped_until_a_human_comments(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Commit expense record", assignee="fin_finance_director")
+    _park_via_loop_breaker(tid)
+
+    with kbc.connect_closing() as conn:
+        assert kb.loop_parked(conn, tid)
+        comments = kb.list_comments(conn, tid)
+        assert any(c.author == "loop-breaker" and "LOOP BREAKER" in c.body for c in comments)
+
+    # Sweeps skip it; direct specify refuses it.
+    assert tid not in spec.list_triage_ids()
+    from hermes_cli import kanban_decompose as decomp
+    assert tid not in decomp.list_triage_ids()
+    out = spec.specify_task(tid, author="auto-decomposer")
+    assert out.ok is False and "loop-parked" in out.reason
+    dout = decomp.decompose_task(tid, author="auto-decomposer")
+    assert dout.ok is False and "loop-parked" in dout.reason
+
+    # Automation chatter (assignee profile, worker) does not release it.
+    with kbc.connect_closing() as conn:
+        kb.add_comment(conn, tid, "fin_finance_director", "STATUS | still need David")
+        kb.add_comment(conn, tid, "worker", "DECISION | authority=L3 | choice=(a)")
+        assert kb.loop_parked(conn, tid)
+    assert tid not in spec.list_triage_ids()
+
+    # A human comment releases it.
+    with kbc.connect_closing() as conn:
+        kb.add_comment(conn, tid, "david", "DECISION | choice=(a) IT and Internet Expenses")
+        assert not kb.loop_parked(conn, tid)
+    assert tid in spec.list_triage_ids()
+    assert tid in decomp.list_triage_ids()
+
+
+def test_loop_parked_is_false_for_ordinary_triage_cards(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Fresh one-liner")
+        with kbc.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
+        assert not kb.loop_parked(conn, tid)
+    assert tid in spec.list_triage_ids()

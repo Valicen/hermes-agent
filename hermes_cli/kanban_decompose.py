@@ -304,6 +304,9 @@ def decompose_task(
     task, reason = _load_triage_task(task_id)
     if task is None:
         return DecomposeOutcome(task_id, False, reason)
+    with kbc.connect_closing() as conn:  # Talaria row 15
+        if kb.loop_parked(conn, task_id):
+            return DecomposeOutcome(task_id, False, "loop-parked: block-loop breaker is holding this card for a human comment")
 
     routing = _load_routing()
     raw, reason = _call_aux(
@@ -332,7 +335,8 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+        # Talaria row 15: loop-parked cards wait for a human comment.
+        return [row.id for row in rows if not kb.loop_parked(conn, row.id)]
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
