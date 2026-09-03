@@ -312,6 +312,7 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         for start, what in (
             (server._start_backend_heartbeat_refresher, "backend heartbeat refresher start"),
             (server._schedule_startup_orphan_sweep, "startup orphan sweep scheduling"),
+            (server._start_orphan_kanban_notifier, "orphan kanban notifier start"),  # Talaria row 16
         ):
             try:
                 start()
