@@ -13,6 +13,10 @@
       },
       "models": [
         {
+          "id": "openrouter/auto",
+          "description": "Auto Router \u2014 OpenRouter picks per request (routing policy applies)"
+        },
+        {
           "id": "anthropic/claude-fable-5.1",
           "description": ""
         },
@@ -253,6 +257,9 @@
         "note": "The entry labeled \"default\": true is the model Hermes silently lands on when the user never picked one."
       },
       "models": [
+        {
+          "id": "openrouter/auto"
+        },
         {
           "id": "anthropic/claude-fable-5.1"
         },

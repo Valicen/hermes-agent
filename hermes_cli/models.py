@@ -31,6 +31,7 @@ from hermes_cli.urllib_security import open_credentialed_url
 from hermes_cli.models_catalog_static import (
     CANONICAL_PROVIDERS,
     OPENROUTER_MODELS,
+    _OPENROUTER_DESCRIPTIONS,
     PREFERRED_SILENT_DEFAULT_MODEL,
     VERCEL_AI_GATEWAY_MODELS,
     _AGGREGATOR_PROVIDERS,
@@ -569,7 +570,7 @@ def fetch_openrouter_models(
         remote = get_curated_openrouter_models()
     except Exception:
         remote = None
-    fallback = list(remote) if remote else list(OPENROUTER_MODELS)
+    fallback = _pin_openrouter_router(list(remote) if remote else list(OPENROUTER_MODELS))
 
     live = _fetch_live_catalog_index(_OPENROUTER_CATALOG_URL, timeout, _urlopen_model_catalog_request)
     if live is None:
@@ -600,11 +601,36 @@ def fetch_openrouter_models(
 
     if not curated:
         return list(cached or fallback)
+    # The live filter keeps only ids the /v1/models payload confirms with tool support; the Auto
+    # Router is confirmed that way today, but a gateway mirror that omits the pseudo-model must
+    # not hide the fleet default either.
+    curated = _pin_openrouter_router(curated, description=dict(fallback).get(OPENROUTER_ROUTER_MODEL))
     if not curated[0][1]:
         curated[0] = (curated[0][0], "recommended")
     profile_slot_set(_me, "_openrouter_catalog_cache", curated)
     _write_openrouter_catalog_disk(curated)
     return list(curated)
+
+
+OPENROUTER_ROUTER_MODEL = "openrouter/auto"
+
+
+def _pin_openrouter_router(
+    models: list[tuple[str, str]], *, description: str | None = None) -> list[tuple[str, str]]:
+    """Guarantee ``openrouter/auto`` heads the OpenRouter picker list.
+
+    The Auto Router is OpenRouter's own routing pseudo-model and the model every Valicen profile
+    defaults to, yet neither the remote manifest nor the live-filtered snapshot listed it: it only
+    ever reached a picker by being *injected as the current model* (``_finalize_picker_rows``). So
+    a profile switched to any other model lost the option to switch back from the UI, and the
+    routing tier read "n/a — pinned" with no way to un-pin (Argus, 2026-09-07). Idempotent: an
+    existing entry keeps its description and moves to the front; ``description`` is the
+    manifest's wording when the live filter dropped the entry before we got here."""
+    rest = [(mid, desc) for mid, desc in models if mid != OPENROUTER_ROUTER_MODEL]
+    existing = next((desc for mid, desc in models if mid == OPENROUTER_ROUTER_MODEL), None)
+    if existing is None:
+        existing = description if description is not None else _OPENROUTER_DESCRIPTIONS.get(OPENROUTER_ROUTER_MODEL, "")
+    return [(OPENROUTER_ROUTER_MODEL, existing), *rest]
 
 
 def model_ids(*, force_refresh: bool = False) -> list[str]:

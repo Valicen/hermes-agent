@@ -110,6 +110,69 @@ class TestFetchOpenRouterModels:
 
 
 
+class TestOpenRouterAutoRouterPinned:
+    """``openrouter/auto`` must be in the OpenRouter picker list in every catalogue state.
+
+    Before (Talaria row 18, 2026-09-07): neither the remote manifest nor the live-filtered
+    snapshot listed the Auto Router; it reached a picker only as the injected *current* model.
+    A profile switched to any other model could never switch back from the UI.
+    """
+
+    def _live(self, ids):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                rows = ",".join(
+                    '{"id":"%s","pricing":{"prompt":"0.00001","completion":"0.00003"},'
+                    '"supported_parameters":["tools","temperature"]}' % mid for mid in ids)
+                return ("{\"data\":[" + rows + "]}").encode()
+        return _Resp()
+
+    def test_manifest_without_auto_still_lists_it_first(self, monkeypatch):
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        with (
+            patch("hermes_cli.model_catalog.get_curated_openrouter_models",
+                  return_value=[("anthropic/claude-opus-4.6", ""), ("qwen/qwen3.7-max", "")]),
+            patch("hermes_cli.models._urlopen_model_catalog_request",
+                  return_value=self._live(["anthropic/claude-opus-4.6", "qwen/qwen3.7-max"])),
+        ):
+            models = fetch_openrouter_models(force_refresh=True)
+        assert models[0][0] == "openrouter/auto"
+        assert [mid for mid, _ in models][1:] == ["anthropic/claude-opus-4.6", "qwen/qwen3.7-max"]
+        assert "Auto Router" in models[0][1]
+
+    def test_live_catalog_omitting_auto_does_not_hide_it(self, monkeypatch):
+        # A mirror that never lists the pseudo-model: the router is pinned regardless.
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        with (
+            patch("hermes_cli.model_catalog.get_curated_openrouter_models",
+                  return_value=[("openrouter/auto", "custom label"), ("qwen/qwen3.7-max", "")]),
+            patch("hermes_cli.models._urlopen_model_catalog_request",
+                  return_value=self._live(["qwen/qwen3.7-max"])),
+        ):
+            models = fetch_openrouter_models(force_refresh=True)
+        assert [mid for mid, _ in models] == ["openrouter/auto", "qwen/qwen3.7-max"]
+        assert models[0][1] == "custom label"  # an existing entry keeps its description
+
+    def test_static_snapshot_and_offline_fallback_lead_with_auto(self, monkeypatch):
+        assert OPENROUTER_MODELS[0][0] == "openrouter/auto"
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        with patch("hermes_cli.model_catalog.get_curated_openrouter_models", return_value=None), \
+             patch("hermes_cli.models._urlopen_model_catalog_request", side_effect=OSError("boom")):
+            models = fetch_openrouter_models(force_refresh=True)
+        assert models[0][0] == "openrouter/auto"
+
+    def test_pin_is_idempotent(self):
+        pinned = _models_mod._pin_openrouter_router([("a/b", ""), ("openrouter/auto", "x"), ("c/d", "")])
+        assert pinned == [("openrouter/auto", "x"), ("a/b", ""), ("c/d", "")]
+        assert _models_mod._pin_openrouter_router(pinned) == pinned
+
+
 class TestOpenRouterToolSupportHelper:
     """Unit tests for _openrouter_model_supports_tools (Kilo port #9068)."""
 
