@@ -49,6 +49,7 @@ resolver should look here first, not in the files the commit subjects name:
 Tool renames upstream (todo→todo_list, cronjob→cronjob_manage, process→process_manage) are
 alias-mapped in `model_tools._LEGACY_TOOL_ALIASES` / `_LEGACY_TOOLSET_MAP`; profile configs were
 left on the legacy names deliberately (aliases hold; row 13 normalizes its own list).
+| 17 | logging: drop the mcp SDK's benign Streamable-HTTP GET-stream chatter (`Unknown SSE event: endpoint`, `GET stream disconnected, reconnecting`) | n8n MCP Server Trigger gateways (Valicen's mcp-gateway) answer the SDK's GET notification stream with the legacy SSE handshake and close it every ~60s; the SDK logged one WARNING + one INFO per cycle per process — ~5,500 lines/day, 99% of errors.log (2026-09-06), rotating real warnings out within a day. Filter on logger `mcp.client.streamable_http`; tool calls unaffected. **PR candidate** (or upstream mcp SDK: treat `endpoint` on the GET stream as legacy-server signal) | hermes_logging.py (`_BenignMcpStreamFilter`, installed in `_quiet_noisy_loggers`), tests/test_hermes_logging_mcp_noise.py | …stops warning on `endpoint` events from legacy-SSE servers, or the gateway moves off n8n's trigger node |
 
 ## Upstream PRs open
 

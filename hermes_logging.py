@@ -97,10 +97,35 @@ _NOISY_LOGGERS = (
 )
 
 
+class _BenignMcpStreamFilter(logging.Filter):
+    """Drop the mcp SDK's per-reconnect chatter for servers that answer the Streamable-HTTP GET
+    (server-notification) stream with the legacy SSE handshake.
+
+    n8n "MCP Server Trigger" gateways (Valicen's mcp-gateway) answer the GET with a legacy
+    ``event: endpoint`` frame and close the stream after ~60s; the SDK logs ``Unknown SSE
+    event: endpoint`` at WARNING and ``GET stream disconnected, reconnecting`` at INFO on every
+    cycle. Tool calls (POST) are unaffected. Measured 2026-09-06: ~5,500 such lines per day in
+    errors.log across the gateway fleet — 99% of the file — burying real warnings. Everything
+    else from the logger passes. (Valicen local patch, Talaria row 17.)
+    """
+
+    _BENIGN = ("Unknown SSE event: endpoint", "GET stream disconnected, reconnecting")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        return not any(fragment in msg for fragment in self._BENIGN)
+
+
 def _quiet_noisy_loggers() -> None:
     """Pin noisy third-party loggers at WARNING."""
     for name in _NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
+    mcp_stream = logging.getLogger("mcp.client.streamable_http")
+    if not any(isinstance(f, _BenignMcpStreamFilter) for f in mcp_stream.filters):
+        mcp_stream.addFilter(_BenignMcpStreamFilter())
 
 
 def set_session_context(session_id: str) -> None:
