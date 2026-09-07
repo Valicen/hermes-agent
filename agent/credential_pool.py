@@ -2360,6 +2360,7 @@ def _seed_copilot_singleton(seed: _Seeder) -> None:
             COPILOT_ENV_VARS,
             resolve_copilot_token,
             get_copilot_api_token,
+            exchange_recently_failed,
         )
         # All-sources gate BEFORE any work: resolve_copilot_token() shells out
         # and the exchange retries 3x with backoff (~35s worst case); a user
@@ -2377,13 +2378,17 @@ def _seed_copilot_singleton(seed: _Seeder) -> None:
         # Per-source gate BEFORE the (~35s worst case) network exchange.
         if seed.is_suppressed(seed.provider, source_name):
             return
+        # A rejection already in the negative cache is old news: this pass will
+        # not re-attempt the exchange, so it must not re-log the degradation
+        # either (one WARNING per failure window, not per pool load).
+        already_known = exchange_recently_failed(token)
         api_token, enterprise_base_url = get_copilot_api_token(token)
         # get_copilot_api_token falls back to the RAW token when the exchange
         # fails; the Copilot API then routes it to the fallback
         # "copilot-language-server" integrator whose allowlist omits
         # enterprise-only models -> HTTP 400 on every turn. Surface it.
         if api_token == token and not enterprise_base_url:
-            logger.warning(
+            (logger.debug if already_known else logger.warning)(
                 "Copilot token exchange degraded to RAW token (exchange "
                 "unavailable); enterprise-only models may 400 with "
                 "model_not_available_for_integrator until exchange recovers."

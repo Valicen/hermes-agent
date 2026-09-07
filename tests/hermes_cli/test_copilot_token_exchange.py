@@ -275,3 +275,47 @@ class TestExchangeFailureFastPath:
         mod._exchange_failure_cache[fp] = time.time() + 999
         evict_cached_exchanged_token("gho_stale")
         assert fp not in mod._exchange_failure_cache
+
+
+class TestExchangeRecentlyFailed:
+    """credential_pool logs the RAW-token degradation once per failure window (Talaria row 19)."""
+
+    def test_false_when_nothing_cached(self):
+        from hermes_cli.copilot_auth import exchange_recently_failed
+        assert exchange_recently_failed("gho_fresh") is False
+        assert exchange_recently_failed("") is False
+
+    def test_true_inside_negative_cache_window(self):
+        import hermes_cli.copilot_auth as mod
+        mod._exchange_failure_cache[mod._token_fingerprint("gho_rejected")] = time.time() + 60
+        assert mod.exchange_recently_failed("gho_rejected") is True
+        assert mod.exchange_recently_failed("gho_other") is False
+
+    def test_false_once_window_expired(self):
+        import hermes_cli.copilot_auth as mod
+        mod._exchange_failure_cache[mod._token_fingerprint("gho_old")] = time.time() - 1
+        assert mod.exchange_recently_failed("gho_old") is False
+
+    def test_pool_load_warns_once_then_debugs(self, caplog):
+        """First pool load after a rejected exchange WARNs; the next one, inside the negative-cache
+        window, must not re-emit the WARNING (96/hour under an E2E run before this)."""
+        import logging
+        import hermes_cli.copilot_auth as mod
+        from agent import credential_pool as cp
+        token = "gho_nocopilot"
+        fp = mod._token_fingerprint(token)
+        seen = []
+
+        def _exchange(raw):
+            # first call: reject + negative-cache like the real exchange does; later: cached
+            mod._exchange_failure_cache[fp] = time.time() + 1800
+            raise ValueError("rejected")
+
+        with patch("hermes_cli.copilot_auth.exchange_copilot_token", side_effect=_exchange):
+            for _ in range(3):
+                known = mod.exchange_recently_failed(token)
+                api_token, base = mod.get_copilot_api_token(token)
+                assert (api_token, base) == (token, None)
+                seen.append(known)
+        # exactly what credential_pool keys its log level on: unknown first, then known
+        assert seen == [False, True, True]

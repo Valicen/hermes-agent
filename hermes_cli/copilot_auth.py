@@ -495,6 +495,18 @@ def get_copilot_api_token(raw_token: str) -> tuple[str, Optional[str]]:
         return raw_token, None
 
 
+def exchange_recently_failed(raw_token: str) -> bool:
+    """True while the negative cache says this token's exchange failed and is not being
+    retried yet. Lets callers that surface the degraded state (credential_pool's WARNING) say it
+    once per failure window instead of on every provider-discovery pass: with a gh token that
+    has no Copilot entitlement the exchange is rejected permanently (30-min window) and every
+    picker open, dashboard poll and cron spawn re-logged the same line — 96/hour under an E2E
+    run, 115/day idle (Valicen errors.log, 2026-09-07)."""
+    if not raw_token:
+        return False
+    return time.time() < _exchange_failure_cache.get(_token_fingerprint(raw_token), 0.0)
+
+
 def copilot_request_headers(
     *, is_agent_turn: bool = True, is_vision: bool = False) -> dict[str, str]:
     """Build the standard headers for Copilot API requests."""
