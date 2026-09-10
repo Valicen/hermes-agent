@@ -119,6 +119,15 @@ def handle_api_error(
         context_length=_ctx_len, num_messages=len(api_messages) if api_messages else 0,
         base_url=str(getattr(agent, "base_url", "") or ""),
     )
+    # Talaria row 20: a model that answered with a rate limit / overload behind
+    # openrouter/auto is excluded for the rest of the session, so the next retry is
+    # routed to another model in the same band (docs/routing-policy.md,
+    # "model substitution"). The parser decides — no slug in the text, no change.
+    try:
+        from agent.openrouter_routing import note_rate_limited_model as _routing_substitute
+        _routing_substitute(agent, f"{getattr(classified, 'message', '') or ''} {api_error}", classified.reason.value)
+    except Exception:
+        pass
     logger.debug(
         "Error classified: reason=%s status=%s retryable=%s compress=%s rotate=%s fallback=%s",
         classified.reason.value, classified.status_code,

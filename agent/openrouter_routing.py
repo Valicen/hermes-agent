@@ -57,6 +57,7 @@ import copy
 import fnmatch
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -120,6 +121,10 @@ DEFAULT_POLICY: Dict[str, Any] = {
         "auto": True,
         "failures": 2,
         "max_auto_tier": "xhigh",
+        # A model that answers with a rate-limit/overload is excluded for the rest
+        # of the session so openrouter/auto substitutes another model in the SAME
+        # band (cheaper than stepping the band). Escalation still counts the error.
+        "substitute_rate_limited": True,
     },
     "profiles": {},
 }
@@ -437,20 +442,26 @@ def resolve_tier(agent: Any, policy: Dict[str, Any]) -> Tuple[Optional[str], str
     # task by the trust-ladder / escalation-by-outcome scripts. Keys live in
     # routing-policy.yaml under ``cron_jobs.<job id>`` / ``kanban_tasks.<task id>``.
     unit_kind, unit_id = work_unit(agent)
+    pinned_norm = None
     if unit_kind and unit_id:
         table = policy.get("cron_jobs" if unit_kind == "cron" else "kanban_tasks") or {}
         pinned = table.get(unit_id) if isinstance(table, dict) else None
         if pinned is not None:
-            norm = normalize_tier(pinned)
-            if norm is not None:
-                return (None if norm == "auto" else norm), f"{unit_kind} {unit_id} pinned by loop"
-    base = normalize_tier((policy.get("tiers") or {}).get(klass))
-    if base is None or base == "auto":
-        tier = None
-        source = f"class {klass} → auto"
+            pinned_norm = normalize_tier(pinned)
+    if pinned_norm is not None:
+        # A pin is the unit's STARTING band, not an explicit /tier: the session's
+        # automatic escalation below still applies (a pinned-low cron job that hits
+        # two API errors steps to medium instead of dying on the pin).
+        tier = None if pinned_norm == "auto" else pinned_norm
+        source = f"{unit_kind} {unit_id} pinned by loop"
     else:
-        tier = base
-        source = f"class {klass}"
+        base = normalize_tier((policy.get("tiers") or {}).get(klass))
+        if base is None or base == "auto":
+            tier = None
+            source = f"class {klass} → auto"
+        else:
+            tier = base
+            source = f"class {klass}"
     steps = int(getattr(agent, "_routing_escalation", 0) or 0)
     if steps and tier is not None:
         cap = (policy.get("escalation") or {}).get("max_auto_tier")
@@ -524,6 +535,10 @@ def routing_extra_body(agent: Any, model: Optional[str] = None,
         if allowed:
             plugin["allowed_models"] = allowed
         excluded, _prov = exclusion_list(tier, policy)
+        substituted = session_substitutions(agent)
+        for slug in substituted:
+            if slug not in excluded:
+                excluded.append(slug)
         if excluded:
             plugin["excluded_models"] = excluded
         fragment["plugins"] = [plugin]
@@ -545,7 +560,8 @@ def routing_extra_body(agent: Any, model: Optional[str] = None,
     if not fragment:
         return None
     fragment["_routing_meta"] = {"tier": tier, "source": source,
-                                 "class": classify_session(agent)}
+                                 "class": classify_session(agent),
+                                 "substituted": session_substitutions(agent)}
     return fragment
 
 
@@ -596,11 +612,16 @@ def apply_routing_policy(agent: Any, api_kwargs: Dict[str, Any]) -> Dict[str, An
         "ignore": list(fragment.get("provider", {}).get("ignore") or []),
         "data_collection": fragment.get("provider", {}).get("data_collection") or "",
         "prefer": list(fragment.get("provider", {}).get("order") or []),
+        "substituted": list(meta.get("substituted") or []),
     }
     try:
         if getattr(agent, "_routing_last", None) != snapshot:
             _ex = snapshot["excluded"]
-            _ex_text = (f"{len(_ex)} models over price ceiling" if len(_ex) > 4 else ",".join(_ex)) or "-"
+            _subs = snapshot["substituted"]
+            _ex_core = [x for x in _ex if x not in _subs]
+            _ex_text = (f"{len(_ex_core)} models over price ceiling" if len(_ex_core) > 4 else ",".join(_ex_core)) or "-"
+            if _subs:
+                _ex_text += f" +{len(_subs)} rate-limited this session ({','.join(_subs)})"
             logger.info(
                 "routing policy: class=%s tier=%s (%s) excluded=%s ignore=%s data_collection=%s model=%s",
                 snapshot["class"], snapshot["tier"] or "auto", snapshot["source"],
@@ -637,6 +658,7 @@ def _write_ledger(agent: Any, snapshot: Dict[str, Any], model: Any) -> None:
             "tier": snapshot.get("tier") or "auto",
             "source": snapshot.get("source"),
             "escalation_steps": int(getattr(agent, "_routing_escalation", 0) or 0),
+            "substituted": list(snapshot.get("substituted") or []),
             "model": str(model or ""),
         }
         path = ledger_path()
@@ -695,6 +717,68 @@ def note_failure(agent: Any, reason: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Model substitution on rate limits (Talaria row 20)
+# ---------------------------------------------------------------------------
+
+# OpenRouter names the throttled model in the error text, e.g.
+#   "openai/gpt-5.6-luna is temporarily rate-limited upstream. Please retry shortly…"
+#   "deepseek/deepseek-v4-flash is overloaded"
+# The slug is what the Auto Router needs in ``excluded_models`` to pick something else.
+_RATE_LIMITED_SLUG_RE = re.compile(
+    r"(?<![\w/.-])([a-z0-9][\w.-]*/[\w.:-]+)\s+(?:is|was)\s+(?:temporarily\s+|currently\s+)?"
+    r"(?:rate[- ]?limited|overloaded|at\s+capacity)",
+    re.IGNORECASE,
+)
+
+
+def parse_rate_limited_model(text: Any) -> Optional[str]:
+    """Model slug named as rate-limited/overloaded in an error message, or None."""
+    m = _RATE_LIMITED_SLUG_RE.search(str(text or ""))
+    return m.group(1).lower() if m else None
+
+
+def session_substitutions(agent: Any) -> List[str]:
+    """Models excluded for this session because they answered with a rate limit."""
+    subs = getattr(agent, "_routing_substituted", None)
+    return list(subs) if isinstance(subs, list) else []
+
+
+def note_rate_limited_model(agent: Any, error_text: Any, reason: str = "rate_limit") -> Optional[str]:
+    """Record a model that just answered with a rate limit / overload. On an
+    ``openrouter/auto`` session the slug is added to the session's exclusion list
+    so the very next retry is routed to another model in the SAME band — the
+    cheap recovery. Band escalation (``note_failure``) still counts the error, so
+    two throttled models in one session step the band up as before. Returns the
+    slug when a new substitution was recorded, else None. Never raises."""
+    try:
+        policy = effective_policy()
+        if not policy_enabled(policy) or not _is_openrouter(agent):
+            return None
+        if str(getattr(agent, "model", "") or "").strip().lower() not in _AUTO_MODELS:
+            return None   # a pinned model has nothing to substitute; the fallback chain owns that case
+        esc = policy.get("escalation") or {}
+        if not esc.get("substitute_rate_limited", True):
+            return None
+        slug = parse_rate_limited_model(error_text)
+        if not slug:
+            return None
+        subs = session_substitutions(agent)
+        if slug in subs:
+            return None
+        subs.append(slug)
+        agent._routing_substituted = subs
+        logger.warning(
+            "routing policy: %s from %s — excluding it for the rest of this session; "
+            "openrouter/auto substitutes another model in band (%d substituted so far)",
+            reason, slug, len(subs),
+        )
+        return slug
+    except Exception as exc:
+        logger.debug("routing policy: note_rate_limited_model skipped (%s)", exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Human-facing status
 # ---------------------------------------------------------------------------
 
@@ -735,6 +819,11 @@ def describe(agent: Any) -> str:
         f"Auto-escalation: {'on' if esc.get('auto', True) else 'off'} "
         f"after {esc.get('failures', 2)} failures, cap {esc.get('max_auto_tier')}; "
         f"steps so far {int(getattr(agent, '_routing_escalation', 0) or 0)}."
+    )
+    _subs = session_substitutions(agent)
+    lines.append(
+        f"Rate-limit substitution: {'on' if esc.get('substitute_rate_limited', True) else 'off'} — "
+        + (f"excluded this session: {', '.join(_subs)}." if _subs else "no model excluded this session.")
     )
     lines.append("Change: /tier low|medium|high|xhigh|max|auto (this session) · /tier reset · file: "
                  + str(policy_path()))

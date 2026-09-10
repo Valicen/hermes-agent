@@ -161,6 +161,29 @@ medium (cap xhigh)`. Explicit `/tier` overrides are never escalated. The
 kanban dead-handoff watchdog and Argus night watch both read the journal, so
 repeated escalations surface as receipts without any new plumbing.
 
+Loop pins (`cron_jobs.<id>` / `kanban_tasks.<id>`) are a unit's *starting*
+band, not an explicit override: a pinned session still escalates (since
+2026-09-10 — before that a pinned-low cron job died on the pin after three
+retries against the same throttled model).
+
+## Model substitution on rate limits (cheaper than escalating)
+
+Escalating the band does not stop the Auto Router from picking the same
+throttled model again in the next band. So when an error names the model
+(`openai/gpt-5.6-luna is temporarily rate-limited upstream…`, `… is
+overloaded`), `note_rate_limited_model()` adds that slug to the **session's**
+`excluded_models` and the very next retry is routed to another model in the
+same band. Session-scoped on purpose (the throttle is transient and the
+prompt cache is per model anyway); nothing is written to the policy file.
+The error still counts toward escalation, so two throttled models in one
+session step the band up as before. Receipts: WARNING
+`routing policy: upstream_rate_limit from openai/gpt-5.6-luna — excluding it
+for the rest of this session…`, the `+1 rate-limited this session (…)`
+suffix on the routing-policy INFO line, `substituted: [...]` in the ledger
+row, and `/tier status`. Off switch: `escalation.substitute_rate_limited:
+false`. Pinned models (not `openrouter/auto`) are untouched — the fallback
+chain owns that case.
+
 ## Loosening the belt
 
 Ordered from fastest/most local to most global. All are reversible.

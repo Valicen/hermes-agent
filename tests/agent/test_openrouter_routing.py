@@ -292,3 +292,81 @@ def test_ledger_records_decisions(policy_file, monkeypatch, tmp_path):
     rp.apply_routing_policy(agent, _kwargs())
     rows = [json.loads(l) for l in ledger.read_text().splitlines()]
     assert len(rows) == 2 and rows[1]["tier"] == "medium" and rows[1]["escalation_steps"] == 1
+
+
+# --- Talaria row 20: rate-limit → model substitution in band; pinned bands still escalate ---
+
+LUNA_429 = "RuntimeError: openai/gpt-5.6-luna is temporarily rate-limited upstream. Please retry shortly, or add your own key"
+
+
+@pytest.mark.parametrize("text, expected", [
+    (LUNA_429, "openai/gpt-5.6-luna"),
+    ("Provider returned error: deepseek/deepseek-v4-flash is overloaded", "deepseek/deepseek-v4-flash"),
+    ("z-ai/glm-5.3-flash was rate limited", "z-ai/glm-5.3-flash"),
+    ("Rate limit exceeded: free-models-per-day", None),            # no slug named → nothing to substitute
+    ("model anthropic/claude-sonnet-5 returned 500", None),        # not a rate limit
+])
+def test_parse_rate_limited_model(text, expected):
+    assert rp.parse_rate_limited_model(text) == expected
+
+
+def test_rate_limited_model_is_excluded_for_the_session_in_the_same_band(policy_file):
+    agent = _agent(platform="cron")                                   # low
+    assert rp.note_rate_limited_model(agent, LUNA_429, "upstream_rate_limit") == "openai/gpt-5.6-luna"
+    plugin = rp.apply_routing_policy(agent, _kwargs())["extra_body"]["plugins"][0]
+    assert "openai/gpt-5.6-luna" in plugin["excluded_models"]
+    assert plugin["cost_tier"] == "low"                               # band unchanged: substitution, not escalation
+    assert set(OVER_DEFAULT_CEILING) <= set(plugin["excluded_models"])   # ceiling exclusions kept
+    assert rp.note_rate_limited_model(agent, LUNA_429) is None        # already excluded → no new record
+    assert rp.session_substitutions(agent) == ["openai/gpt-5.6-luna"]
+    assert "excluded this session: openai/gpt-5.6-luna" in rp.describe(agent)
+
+
+def test_substitution_survives_ceiling_lifted_tier(policy_file):
+    agent = _agent(); agent._routing_tier_override = "max"
+    rp.note_rate_limited_model(agent, LUNA_429)
+    plugin = rp.apply_routing_policy(agent, _kwargs())["extra_body"]["plugins"][0]
+    assert plugin["excluded_models"] == ["openai/gpt-5.6-luna"]
+
+
+def test_substitution_only_for_auto_router_and_can_be_disabled(policy_file):
+    pinned = _agent(model="anthropic/claude-sonnet-5")                # pinned model: fallback chain owns it
+    assert rp.note_rate_limited_model(pinned, LUNA_429) is None
+    assert rp.note_rate_limited_model(_agent(provider="anthropic"), LUNA_429) is None
+    assert rp.note_rate_limited_model(_agent(), "Rate limit exceeded") is None
+    policy_file("escalation:\n  substitute_rate_limited: false\n")
+    assert rp.note_rate_limited_model(_agent(), LUNA_429) is None
+
+
+def test_pinned_band_still_escalates_after_repeated_failures(policy_file):
+    policy_file("cron_jobs:\n  2ab871ac3b29: low\ntiers:\n  cron: medium\n")
+    agent = _agent(platform="cron"); agent.session_id = "cron_2ab871ac3b29_20260910_091548"
+    tier, source = rp.resolve_tier(agent, rp.effective_policy())
+    assert tier == "low" and "pinned by loop" in source
+    assert rp.note_failure(agent, "api_error") is None
+    assert rp.note_failure(agent, "api_error") == "medium"
+    tier, source = rp.resolve_tier(agent, rp.effective_policy())
+    assert tier == "medium" and "pinned by loop" in source and "+1 escalation" in source
+
+
+def test_ledger_and_log_record_substitutions(policy_file, monkeypatch, tmp_path, caplog):
+    import json
+    ledger = tmp_path / "ledger.jsonl"
+    monkeypatch.setenv("HERMES_ROUTING_LEDGER", str(ledger))
+    agent = _agent(platform="cron")
+    rp.apply_routing_policy(agent, _kwargs())
+    rp.note_rate_limited_model(agent, LUNA_429)
+    with caplog.at_level(logging.INFO, logger=rp.logger.name):
+        rp.apply_routing_policy(agent, _kwargs())                    # substitution changes the snapshot → new row
+    rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+    assert len(rows) == 2 and rows[1]["substituted"] == ["openai/gpt-5.6-luna"] and rows[1]["tier"] == "low"
+    assert "rate-limited this session (openai/gpt-5.6-luna)" in caplog.text
+
+
+def test_error_handler_calls_substitution_with_the_error_text(monkeypatch):
+    """turn_api_error hands the classified message + exception text to the routing module."""
+    import agent.turn_api_error as tae
+    seen = {}
+    monkeypatch.setattr(rp, "note_rate_limited_model", lambda agent, text, reason="": seen.update(text=text, reason=reason))
+    src = open(tae.__file__, encoding="utf-8").read()
+    assert "note_rate_limited_model" in src and "classified.reason.value" in src
