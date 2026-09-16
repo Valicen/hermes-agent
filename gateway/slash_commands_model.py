@@ -706,7 +706,7 @@ class GatewayModelCommandsMixin:
         Session-scoped only (cleared by /new). ``max`` lifts the exclusion cage so Opus
         becomes eligible; ``auto`` keeps the cage but lets the router choose inside it;
         ``reset`` returns to the policy default. Durable knobs live in routing-policy.yaml —
-        see docs/routing-policy.md.
+        see website/docs/developer-guide/routing-policy.md.
         """
         from agent.openrouter_routing import TIERS, TIER_GUIDE, describe, normalize_tier
 

@@ -132,7 +132,7 @@ def build_api_request(
         _set_extra_header(api_kwargs, "X-OpenRouter-Cache", "false")
     # Talaria rows 12/14: OpenRouter routing policy — cage openrouter/auto (price-ceiling
     # exclusions, cost band per session class, provider order) and apply /tier or
-    # auto-escalation overrides. See agent/openrouter_routing.py, docs/routing-policy.md.
+    # auto-escalation overrides. See agent/openrouter_routing.py, website/docs/developer-guide/routing-policy.md.
     if agent._is_openrouter_url():
         from agent.openrouter_routing import apply_routing_policy
         api_kwargs = apply_routing_policy(agent, api_kwargs)

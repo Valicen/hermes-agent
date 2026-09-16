@@ -207,7 +207,7 @@ def _set_tier(rid, params, key, value, session):
 
     value: low|medium|high|xhigh|max|auto (pin), reset (drop pin), status (report only). Never
     touches config.yaml; durable knobs live in ~/.hermes/routing-policy.yaml
-    (docs/routing-policy.md). Without a session (a chat not created yet) it reports the
+    (website/docs/developer-guide/routing-policy.md). Without a session (a chat not created yet) it reports the
     profile's policy default so pickers can show it before the first message; ``profile``
     names the target profile ("default" = root).
     """

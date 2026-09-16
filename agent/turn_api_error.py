@@ -60,7 +60,7 @@ def handle_api_error(
     preflight re-runs against the fallback's context window (#84733)."""
     _provider_overflow_recovery_pending = False
     # Talaria row 12: repeated API errors in one session step the routing tier up
-    # (docs/routing-policy.md, "automatic escalation").
+    # (website/docs/developer-guide/routing-policy.md, "automatic escalation").
     try:
         from agent.openrouter_routing import note_failure as _routing_note_failure
         _routing_note_failure(agent, "api_error")
@@ -121,7 +121,7 @@ def handle_api_error(
     )
     # Talaria row 20: a model that answered with a rate limit / overload behind
     # openrouter/auto is excluded for the rest of the session, so the next retry is
-    # routed to another model in the same band (docs/routing-policy.md,
+    # routed to another model in the same band (website/docs/developer-guide/routing-policy.md,
     # "model substitution"). The parser decides — no slug in the text, no change.
     try:
         from agent.openrouter_routing import note_rate_limited_model as _routing_substitute

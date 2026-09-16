@@ -1,7 +1,7 @@
 """OpenRouter routing policy — cage ``openrouter/auto`` per session, escalate on failure.
 
 Talaria (Valicen fork) feature, 2026-08-29. Background and the numbers that
-motivated it live in ``docs/routing-policy.md``; the short version:
+motivated it live in ``website/docs/developer-guide/routing-policy.md``; the short version:
 
 * Every Valicen profile runs ``openrouter/auto``. The Auto Router picks a
   *model* per request from "what the OpenRouter community spends on for this
@@ -43,7 +43,7 @@ What this module does, per API call on an OpenRouter route:
    a session (capped at ``escalation.max_auto_tier``), so a model that is
    failing us gets replaced by a stronger band without human intervention.
 
-Loosening the belt (all documented in docs/routing-policy.md):
+Loosening the belt (all documented in website/docs/developer-guide/routing-policy.md):
   * ``/tier high|xhigh|max`` in any chat — this session only (``max`` lifts the
     price ceiling; automation stops at ``xhigh``).
   * ``/tier auto`` — keep the ceiling but let the router pick freely under it.
@@ -341,7 +341,7 @@ def models_over_ceiling(policy: Dict[str, Any]) -> Tuple[List[str], str]:
 # Tiers
 # ---------------------------------------------------------------------------
 
-# What each band bought on one representative prompt, 2026-08-29 (docs/routing-policy.md).
+# What each band bought on one representative prompt, 2026-08-29 (website/docs/developer-guide/routing-policy.md).
 TIER_GUIDE: Dict[str, str] = {
     "low":    "cheapest capable models  (~$0.1–0.3/M in)   e.g. deepseek-v4-flash, gpt-5.6-luna, gemini-3.7-flash",
     "medium": "mid-price workhorses     (~$0.5–1.5/M in)   e.g. glm-5.2, deepseek-v4-pro",
