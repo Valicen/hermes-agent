@@ -190,6 +190,12 @@ class TestTreeFingerprint:
         self._git(repo, "add", "NOTES.md")
         self._git(repo, "commit", "-q", "-m", "docs")
         assert code_skew.detect_code_skew() is None
+        # A test-only change is not skew: pytest collects tests/, the gateway never imports it.
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_a.py").write_text("def test_a():\n    assert True\n")
+        self._git(repo, "add", "tests/test_a.py")
+        self._git(repo, "commit", "-q", "-m", "tests")
+        assert code_skew.detect_code_skew() is None
         # A real content change IS skew.
         (repo / "a.py").write_text("x = 2\n")
         self._git(repo, "commit", "-q", "-am", "three")

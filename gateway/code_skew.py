@@ -14,14 +14,13 @@ import re
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# Paths whose content can never be imported/loaded by a running gateway.
-import re as _re
-_DOC_ONLY_RE = _re.compile(r"(^|/)(docs|website|\.github)/|\.(md|rst|txt)$", _re.IGNORECASE)
 _boot_fingerprint: str | None = None
 
 
-# Paths whose content can never be imported/loaded by a running gateway.
-_DOC_ONLY_RE = re.compile(r"(^|/)(docs|website|\.github)/|\.(md|rst|txt)$", re.IGNORECASE)
+# Paths whose content can never be imported/loaded by a running gateway. tests/ is
+# collected by pytest only — a test-only commit (2026-09-16) must not 503 the
+# model picker until a fleet restart.
+_DOC_ONLY_RE = re.compile(r"(^|/)(docs|website|tests|\.github)/|\.(md|rst|txt)$", re.IGNORECASE)
 
 
 def _tree_fingerprint() -> str | None:
