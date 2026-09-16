@@ -242,7 +242,7 @@ def _fake_response(status, url, body):
     """A minimal stand-in for the httpx.Response the SDK feeds our bridge."""
     resp = MagicMock()
     resp.status_code = status
-    resp.request = SimpleNamespace(url=url)
+    resp.request = SimpleNamespace(url=url, method="GET")
 
     async def _aread():
         return body
