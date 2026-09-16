@@ -65,7 +65,7 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 TIERS: Tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
-SESSION_CLASSES: Tuple[str, ...] = ("cron", "kanban", "subagent", "interactive")
+SESSION_CLASSES: Tuple[str, ...] = ("cron", "kanban", "subagent", "room", "interactive")
 POLICY_FILENAME = "routing-policy.yaml"
 
 # Baseline when the fleet file is missing or a key is absent. Mirrors the
@@ -115,7 +115,7 @@ DEFAULT_POLICY: Dict[str, Any] = {
         "cron": "low",
         "kanban": "medium",
         "subagent": "low",
-        "interactive": "high",
+        "room": "low", "interactive": "high",
     },
     "escalation": {
         "auto": True,
@@ -391,6 +391,12 @@ def classify_session(agent: Any) -> str:
         klass = "cron"
     elif platform == "subagent":
         klass = "subagent"
+    elif platform == "bot_room":
+        # Hosted-room member turns (Bot Mode groups / Argus War Room): the gateway creates
+        # those sessions with source "bot_room" and never rewrites an explicit source, so it
+        # arrives here as the platform. Batch deliberation, not a human typing — it must not
+        # pay the interactive band (2026-09-16, Talaria row 24).
+        klass = "room"
     else:
         klass = "interactive"
         try:
@@ -455,7 +461,12 @@ def resolve_tier(agent: Any, policy: Dict[str, Any]) -> Tuple[Optional[str], str
         tier = None if pinned_norm == "auto" else pinned_norm
         source = f"{unit_kind} {unit_id} pinned by loop"
     else:
-        base = normalize_tier((policy.get("tiers") or {}).get(klass))
+        tiers = policy.get("tiers") or {}
+        # A policy file written before the room class existed has no ``room`` key: rooms
+        # borrow the kanban band (batch work), never the interactive one. Absent, not
+        # falsy — ``normalize_tier(None)`` is "auto".
+        band_key = "kanban" if klass == "room" and "room" not in tiers else klass
+        base = normalize_tier(tiers.get(band_key))
         if base is None or base == "auto":
             tier = None
             source = f"class {klass} → auto"

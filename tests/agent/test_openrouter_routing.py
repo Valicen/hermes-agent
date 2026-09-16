@@ -370,3 +370,25 @@ def test_error_handler_calls_substitution_with_the_error_text(monkeypatch):
     monkeypatch.setattr(rp, "note_rate_limited_model", lambda agent, text, reason="": seen.update(text=text, reason=reason))
     src = open(tae.__file__, encoding="utf-8").read()
     assert "note_rate_limited_model" in src and "classified.reason.value" in src
+
+
+
+# --- Talaria row 24: hosted-room member turns are their own class ---------------------------
+def test_row24_bot_room_platform_classifies_as_room(monkeypatch):
+    import agent.openrouter_routing as rp
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    agent = type("A", (), {})()
+    agent.platform = "bot_room"
+    assert rp.classify_session(agent) == "room"
+
+
+def test_row24_room_tier_falls_back_to_kanban_when_policy_predates_it(monkeypatch):
+    import agent.openrouter_routing as rp
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_ROUTING_TIER", raising=False)
+    agent = type("A", (), {})()
+    agent.platform = "bot_room"
+    tier, source = rp.resolve_tier(agent, {"tiers": {"kanban": "low", "interactive": "high"}})
+    assert tier == "low" and "room" in source
+    tier2, _ = rp.resolve_tier(agent, {"tiers": {"room": "medium", "kanban": "low", "interactive": "high"}})
+    assert tier2 == "medium"

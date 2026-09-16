@@ -56,6 +56,8 @@ right after `_build_api_kwargs`, before request middleware):
    the built-in defaults; the policy can never break a turn.
 2. **Classify the session once** — `cron` (platform `cron`), `kanban`
    (`HERMES_KANBAN_TASK` set), `subagent` (delegated child), otherwise
+   `room` (hosted-room member turns — Bot Mode groups / Argus War Room; default
+   band `low`, falls back to the `kanban` band when a policy predates it), and
    `interactive` (desktop, dashboard, Telegram, CLI). The class is cached on
    the agent object and never re-evaluated.
 3. **Resolve the tier**, highest priority first:
