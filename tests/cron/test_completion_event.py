@@ -25,7 +25,7 @@ def test_completion_event_runs_after_output_is_saved(monkeypatch, tmp_path):
     monkeypatch.setattr(scheduler, "mark_job_run", lambda *_a, **_kw: None)
     monkeypatch.setattr(scheduler, "finish_execution", lambda *_a, **_kw: None)
     monkeypatch.setattr(scheduler, "claim_dispatch", lambda _job_id: True)
-    monkeypatch.setattr(scheduler, "mark_execution_running", lambda _id: None)
+    monkeypatch.setattr(scheduler, "mark_execution_running", lambda _id: {"id": _id, "status": "running"})
 
     def event(job, *, output_file, success, **_kw):
         calls.append("event")
@@ -53,7 +53,7 @@ def test_completion_event_failure_is_recorded_without_rewriting_upstream(monkeyp
     monkeypatch.setattr(scheduler, "mark_job_run", lambda *_a, **_kw: marks.append(_a))
     monkeypatch.setattr(scheduler, "finish_execution", lambda *_a, **_kw: None)
     monkeypatch.setattr(scheduler, "claim_dispatch", lambda _job_id: True)
-    monkeypatch.setattr(scheduler, "mark_execution_running", lambda _id: None)
+    monkeypatch.setattr(scheduler, "mark_execution_running", lambda _id: {"id": _id, "status": "running"})
     monkeypatch.setattr(scheduler, "_run_completion_event", lambda *_a, **_kw: "email unavailable")
 
     assert scheduler.run_one_job({
