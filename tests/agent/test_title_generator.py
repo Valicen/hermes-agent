@@ -728,3 +728,42 @@ class TestModelSwitchMarkerNotTitleable:
         assert apply_instant_title(db, "sess-1", "南京市秦淮区 小时级天气预报") == (
             "南京市秦淮区 小时级天气预报"
         )
+
+
+
+# --- Talaria row 23: truncated / preamble replies never become titles -------------------------
+from agent.title_generator import _clean_title as _row23_clean_title
+
+
+def test_row23_clean_title_rejects_fragments_and_preambles():
+    for stub in ("H", "He", "Her", "Here", "Here is", "Here's the title", "Here is the JSON requested", "Sure:", "Title:"):
+        assert _row23_clean_title(stub) is None, stub
+
+
+def test_row23_clean_title_keeps_topical_titles_starting_with_here():
+    assert _row23_clean_title("Here comes the sun") == "Here comes the sun"
+    assert _row23_clean_title("Delta Star time log") == "Delta Star time log"
+
+
+def test_row23_length_truncated_reply_is_rejected(monkeypatch):
+    from unittest.mock import MagicMock
+    import agent.title_generator as tg
+    resp = MagicMock()
+    resp.choices = [MagicMock()]
+    resp.choices[0].message.content = '{"title": "Perfectly fine title'
+    resp.choices[0].finish_reason = "length"
+    monkeypatch.setattr(tg, "call_llm", lambda **kw: resp)
+    monkeypatch.setattr(tg, "_auto_title_enabled", lambda: True)
+    assert tg.generate_title("some user message about billing") is None
+
+
+def test_row23_stop_reply_still_titles(monkeypatch):
+    from unittest.mock import MagicMock
+    import agent.title_generator as tg
+    resp = MagicMock()
+    resp.choices = [MagicMock()]
+    resp.choices[0].message.content = '{"title": "Billing question"}'
+    resp.choices[0].finish_reason = "stop"
+    monkeypatch.setattr(tg, "call_llm", lambda **kw: resp)
+    monkeypatch.setattr(tg, "_auto_title_enabled", lambda: True)
+    assert tg.generate_title("some user message about billing") == "Billing question"

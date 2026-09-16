@@ -226,11 +226,26 @@ def _extract_title_text(content: str) -> str:
     return _strip_title_prefix(_first_line(raw)).strip("\"'").strip()
 
 
+# Bare preambles a model emits before the actual title when its reply was cut or it ignored
+# response_format: "Here is", "Here's the title", "Here is the JSON requested", "Sure". Never a
+# title on their own; a topical title that merely starts with "Here" ("Here comes the sun") has
+# more words after the preamble and passes.
+_PREAMBLE_STUB_RE = re.compile(
+    r"^(?:here(?:'s| is| are)?|sure|ok(?:ay)?|title|certainly)(?:[,!:]|\s+(?:the|a|your|is))?"
+    r"(?:\s+(?:concise|short|requested|json|title|session|chat))*(?:\s+requested)?[\s.:!]*$",
+    re.IGNORECASE,
+)
+
+
 def _clean_title(text: str) -> Optional[str]:
     """Normalize a model-produced title, or None when nothing usable remains."""
     title = _strip_title_prefix(" ".join((text or "").split()).strip("\"'").strip()).rstrip(".!,;:")
     if len(title) > 80:
         title = title[:77].rstrip() + "..."
+    # Fragments ("H", "He", "Her") and bare preambles are what a truncated or task-ignoring reply leaves
+    # behind; storing them made 28 sessions read "Here is #N" (2026-09-16, Talaria row 23).
+    if len(title) < 4 or _PREAMBLE_STUB_RE.match(title):
+        return None
     return title or None
 
 
@@ -299,7 +314,11 @@ def generate_title(
             task="title_generation",
             messages=[{"role": "system", "content": prompt}, {"role": "user", "content": user_snippet}],
             # A title is a handful of tokens; a larger ceiling let chatty models burn seconds.
-            max_tokens=64, temperature=0.3, timeout=timeout, main_runtime=main_runtime,
+            # 64 was not enough headroom on Gemini 3.x via OpenRouter: thinking cannot be fully
+            # disabled there, thought tokens bill against max_tokens, and the visible reply was a
+            # cut-off preamble ("Here is the JSON requested" -> "Here is" -> "He") that the prose
+            # fallback stored as the title; 28 such sessions on 2026-09-16 (Talaria row 23).
+            max_tokens=200, temperature=0.3, timeout=timeout, main_runtime=main_runtime,
             extra_body={"response_format": _TITLE_RESPONSE_FORMAT},
             # The module contract above promises thinking-disabled operation,
             # but nothing enforced it: with the aux default reasoning_effort
@@ -309,7 +328,14 @@ def generate_title(
             # ("```json") as the session title (#91927).
             reasoning_config={"enabled": False},
         )
-        title = _clean_title(_extract_title_text(response.choices[0].message.content or ""))
+        choice = response.choices[0]
+        # A length-truncated reply is never a title: whatever survived the cut is the opening of
+        # a preamble or a JSON fence, not the payload. Reject so the instant derived title stays
+        # and the caller retries on the next exchange (Talaria row 23).
+        if str(getattr(choice, "finish_reason", "") or "").lower() == "length":
+            logger.debug("Rejecting length-truncated title output")
+            return None
+        title = _clean_title(_extract_title_text(choice.message.content or ""))
         # Answer-shaped output guard: titling is a 3-7 word task, so a title with many words is a model that
         # ignored the task and answered the user's message instead ("I don't have context on X — that's not
         # something I recognize..."). Truncating would store half an assistant blob as the session title,
