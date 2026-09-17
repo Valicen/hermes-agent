@@ -131,10 +131,19 @@ class SessionTitlesMixin:
         ValueError on conflict or validation failure."""
         return self._set_session_title(session_id, title, source=self.TITLE_SOURCE_USER)
 
+    # Session sources whose title IS their identity: the hosted-room driver resolves a member's
+    # room session by exact title (``room_session_title``), so an automatic rename orphans the
+    # session and the next turn creates a duplicate — and the old one leaks into chat lists
+    # under a stub name ("Here is #10", 2026-09-16; Talaria row 26).
+    _AUTO_TITLE_IMMUTABLE_SOURCES = frozenset({"bot_room"})
+
     def set_auto_title(self, session_id: str, title: str, *, source: str) -> bool:
         """Set an automatic title; False (untouched) when a higher-authority title holds the row."""
         if source not in (self.TITLE_SOURCE_DERIVED, self.TITLE_SOURCE_LLM):
             raise ValueError(f"invalid automatic title source: {source!r}")
+        row = self._read_one("SELECT source FROM sessions WHERE id = ?", (session_id,))
+        if row is not None and str(row["source"] or "") in self._AUTO_TITLE_IMMUTABLE_SOURCES:
+            return False
         return self._set_session_title(session_id, title, source=source)
 
     def get_session_title(self, session_id: str) -> Optional[str]:

@@ -142,3 +142,17 @@ def test_auto_titler_can_rename_visible_derived_bot_chat(db):
         source=SessionDB.TITLE_SOURCE_LLM,
     )
     assert db.get_session("visible")["title"] == "Renamed by titler"
+
+
+
+# --- Talaria row 26: hosted-room member sessions keep their title-as-identity -----------------
+def test_row26_auto_titler_cannot_rename_bot_room_sessions(db):
+    from hermes_state import SessionDB
+    db.create_session("room-member", source="bot_room")
+    db.set_session_title("room-member", '[Discussion: "War Room"] …')
+    db.set_session_title_source("room-member", SessionDB.TITLE_SOURCE_DERIVED)
+    assert db.set_auto_title("room-member", "Here is", source=SessionDB.TITLE_SOURCE_LLM) is False
+    row = db.get_session("room-member")
+    assert row["title"] == '[Discussion: "War Room"] …'
+    db.create_session("plain", source="cli")
+    assert db.set_auto_title("plain", "Plain title", source=SessionDB.TITLE_SOURCE_LLM) is True
