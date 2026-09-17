@@ -34,11 +34,22 @@ MAX_DISCUSSION_MESSAGES = 10
 # room's recorded round_index would, hence the floor is the recorded defaults.
 _DEFAULT_MAX_ROUNDS, _DEFAULT_MAX_MESSAGES = MAX_DISCUSSION_ROUNDS, MAX_DISCUSSION_MESSAGES
 MAX_ROUNDS_CEILING, MAX_MESSAGES_CEILING = 8, 60
+# Who gets the floor after round 0. Upstream: only members a Bot @-mentioned and who have not
+# spoken since ("mentioned") — everyone else is silent for the rest of the discussion however
+# far it wanders into their function (David, 2026-09-16: "members only speak once unprompted").
+# "open": every member with unseen messages gets the delta each round and may pass; the pass
+# rule and the silent-round settle already bound it, and max_rounds/max_messages still cap it.
+LATER_ROUNDS_MODES = ("mentioned", "open")
+LATER_ROUNDS_MODE = "mentioned"
 
 
-def configure_discussion_limits(max_rounds: Any = None, max_messages: Any = None) -> tuple[int, int]:
-    """Set the per-discussion caps for this process; returns the effective ``(rounds, messages)``."""
-    global MAX_DISCUSSION_ROUNDS, MAX_DISCUSSION_MESSAGES
+def configure_discussion_limits(
+        max_rounds: Any = None, max_messages: Any = None, later_rounds: Any = None) -> tuple[int, int]:
+    """Set the per-discussion caps (and later-round floor policy) for this process; returns the
+    effective ``(rounds, messages)``."""
+    global MAX_DISCUSSION_ROUNDS, MAX_DISCUSSION_MESSAGES, LATER_ROUNDS_MODE
+    mode = str(later_rounds or "").strip().lower()
+    LATER_ROUNDS_MODE = mode if mode in LATER_ROUNDS_MODES else "mentioned"
     def _clamp(value: Any, default: int, ceiling: int) -> int:
         try:
             number = int(value)
@@ -55,7 +66,7 @@ def discussion_limits_from_config(config: Mapping[str, Any] | None) -> tuple[int
     rooms = (config or {}).get("rooms") if isinstance(config, Mapping) else None
     block = rooms.get("discussion") if isinstance(rooms, Mapping) else None
     block = block if isinstance(block, Mapping) else {}
-    return configure_discussion_limits(block.get("max_rounds"), block.get("max_messages"))
+    return configure_discussion_limits(block.get("max_rounds"), block.get("max_messages"), block.get("later_rounds"))
 MAX_DISCUSSION_DELTA_LINES = 24
 MAX_USER_TEXT_BYTES = 64 * 1024
 MAX_MEMBER_TEXT_BYTES = 64 * 1024
@@ -670,9 +681,15 @@ def plan_next_task(
         # Bot and not heard from afterward gets another turn. Every member's
         # watermark remains intact, so a peer cited later still receives the
         # complete bounded transcript delta without consuming turns meanwhile.
-        responders = (
-            resolve_mentions((str(discussion.payload["text"]),), room.members) if round_index == 0
-            else _unaddressed_member_mentions(discussion_messages, room))
+        if round_index == 0:
+            responders = resolve_mentions((str(discussion.payload["text"]),), room.members)
+        elif LATER_ROUNDS_MODE == "open":
+            # Open floor (Talaria row 27): cited-but-unheard members first, then everyone else
+            # with unseen messages; the watermark check below skips members with nothing new.
+            cited = _unaddressed_member_mentions(discussion_messages, room)
+            responders = tuple(cited) + tuple(member for member in room.members if member not in cited)
+        else:
+            responders = _unaddressed_member_mentions(discussion_messages, room)
         for member_index, member in enumerate(_rotate(responders, round_index)):
             if (round_index, member.member_id) in terminals:
                 continue

@@ -807,3 +807,31 @@ def test_row25_discussion_limits_clamp_and_default(monkeypatch):
         assert d.discussion_limits_from_config({}) == (3, 10)
     finally:
         d.configure_discussion_limits(None, None)
+
+
+
+# --- Talaria row 27: open floor in later rounds ------------------------------------------------
+def test_row27_open_floor_gives_unmentioned_members_a_later_turn(room_db):
+    db, room = room_db
+    try:
+        discussion.configure_discussion_limits(later_rounds="open")
+        _append_user(db, event_id="user-1", text="@research answer the user")
+        first = _settle_next(room, db, text="The answer is ready for the user.")
+        assert first.member.handle == "research"
+        # Upstream policy would settle here (no member was @-mentioned by a Bot). Open floor: the
+        # other members get the delta in round 1 and may pass.
+        decision = discussion.plan_next_task(room, _events(db), local_profiles=LOCAL_PROFILES)
+        assert decision.status == "task", decision
+        assert decision.task.round_index == 1
+        assert decision.task.member.handle != "research", "the speaker has nothing new to see"
+    finally:
+        discussion.configure_discussion_limits(later_rounds=None)
+
+
+def test_row27_mentioned_mode_is_still_the_default(room_db):
+    db, room = room_db
+    assert discussion.LATER_ROUNDS_MODE == "mentioned"
+    _append_user(db, event_id="user-1", text="@research answer the user")
+    _settle_next(room, db, text="The answer is ready for the user.")
+    decision = discussion.plan_next_task(room, _events(db), local_profiles=LOCAL_PROFILES)
+    assert decision.status == "settled" and decision.reason == "silent_round"
