@@ -26,6 +26,36 @@ MAX_DISCUSSION_MEMBERS = 6
 MIN_DISCUSSION_MEMBERS = 2
 MAX_DISCUSSION_ROUNDS = 3
 MAX_DISCUSSION_MESSAGES = 10
+# Upstream ships the two caps as constants. A 5-member War Room burns 10 messages in two rounds
+# and gets "bounded / max_messages" mid-thought (Valicen 2026-09-16, Talaria row 25); the
+# gateway that hosts rooms may raise them from config (``rooms.discussion.max_rounds`` /
+# ``max_messages``) via :func:`configure_discussion_limits`. Persisted events validate against
+# the CURRENT values, so raising them never invalidates an existing log; lowering them below a
+# room's recorded round_index would, hence the floor is the recorded defaults.
+_DEFAULT_MAX_ROUNDS, _DEFAULT_MAX_MESSAGES = MAX_DISCUSSION_ROUNDS, MAX_DISCUSSION_MESSAGES
+MAX_ROUNDS_CEILING, MAX_MESSAGES_CEILING = 8, 60
+
+
+def configure_discussion_limits(max_rounds: Any = None, max_messages: Any = None) -> tuple[int, int]:
+    """Set the per-discussion caps for this process; returns the effective ``(rounds, messages)``."""
+    global MAX_DISCUSSION_ROUNDS, MAX_DISCUSSION_MESSAGES
+    def _clamp(value: Any, default: int, ceiling: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(default, min(ceiling, number))
+    MAX_DISCUSSION_ROUNDS = _clamp(max_rounds, _DEFAULT_MAX_ROUNDS, MAX_ROUNDS_CEILING)
+    MAX_DISCUSSION_MESSAGES = _clamp(max_messages, _DEFAULT_MAX_MESSAGES, MAX_MESSAGES_CEILING)
+    return MAX_DISCUSSION_ROUNDS, MAX_DISCUSSION_MESSAGES
+
+
+def discussion_limits_from_config(config: Mapping[str, Any] | None) -> tuple[int, int]:
+    """Read ``rooms.discussion.{max_rounds,max_messages}`` from a parsed config and apply them."""
+    rooms = (config or {}).get("rooms") if isinstance(config, Mapping) else None
+    block = rooms.get("discussion") if isinstance(rooms, Mapping) else None
+    block = block if isinstance(block, Mapping) else {}
+    return configure_discussion_limits(block.get("max_rounds"), block.get("max_messages"))
 MAX_DISCUSSION_DELTA_LINES = 24
 MAX_USER_TEXT_BYTES = 64 * 1024
 MAX_MEMBER_TEXT_BYTES = 64 * 1024

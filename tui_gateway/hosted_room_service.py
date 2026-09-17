@@ -69,6 +69,12 @@ class HostedRoomService:
         peer_routes: Mapping[tuple[str, str], PeerMemberRoute] | None = None,
         peer_clients: Mapping[Any, HostedRoomPeerClient] | None = None) -> None:
         self.server, self.db_path = server, Path(db_path or hosted_rooms.default_db_path())
+        # Talaria row 25: per-discussion caps from the hosting process's config (rooms.discussion.*).
+        try:
+            from hermes_cli.config import load_config_readonly as _load_cfg
+            discussion.discussion_limits_from_config(_load_cfg())
+        except Exception:  # config unreadable → upstream defaults
+            pass
         hosted_rooms.prune_disbanded_rooms(self.db_path)
         self._policy_lock = threading.RLock()
         self._pending_actions: dict[tuple[str, str], dict[str, Any]] = {}

@@ -791,3 +791,19 @@ def test_malformed_log_and_task_reconstruction_fail_closed(
             malformed,
             local_profiles=LOCAL_PROFILES,
         )
+
+
+
+# --- Talaria row 25: configurable discussion caps ---------------------------------------------
+def test_row25_discussion_limits_clamp_and_default(monkeypatch):
+    from gateway import hosted_room_discussion as d
+    try:
+        assert d.configure_discussion_limits(4, 24) == (4, 24)
+        assert d.MAX_DISCUSSION_ROUNDS == 4 and d.MAX_DISCUSSION_MESSAGES == 24
+        assert d.configure_discussion_limits("nope", None) == (3, 10), "garbage → upstream defaults"
+        assert d.configure_discussion_limits(99, 999) == (8, 60), "ceilings hold"
+        assert d.configure_discussion_limits(1, 1) == (3, 10), "never below the recorded defaults"
+        assert d.discussion_limits_from_config({"rooms": {"discussion": {"max_rounds": 5, "max_messages": 30}}}) == (5, 30)
+        assert d.discussion_limits_from_config({}) == (3, 10)
+    finally:
+        d.configure_discussion_limits(None, None)
