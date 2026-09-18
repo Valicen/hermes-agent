@@ -96,6 +96,8 @@ class DispatchResult:
 
     reclaimed: int = 0
     promoted: int = 0
+    woke: list[str] = field(default_factory=list)
+    """``scheduled`` cards whose ``wake_at`` passed this tick (Talaria row 29)."""
     reconciled_orphans: list[str] = field(default_factory=list)
     """``running`` cards requeued by :func:`reconcile_orphaned_running` (broken
     claim bookkeeping, dead/gone worker)."""
@@ -1999,6 +2001,12 @@ def _run_reclaim_phase(
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
     result.timed_out = enforce_max_runtime(conn)
+    # Talaria row 29: sleeping cards whose date has come wake here, before the
+    # ready recompute so they can be spawned in this same tick.
+    try:
+        result.woke = _kb.wake_due_tasks(conn)
+    except Exception:
+        _kb._log.warning("kanban dispatch: wake sweep failed", exc_info=True)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 

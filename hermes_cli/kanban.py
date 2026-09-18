@@ -356,6 +356,15 @@ def _cmd_create(args: argparse.Namespace) -> int:
     if max_retries is not None and max_retries < 1:
         return _err(f"kanban: --max-retries must be >= 1 (got {max_retries}); "
                     "use 1 to trip on the first failure.", 2)
+    wake_at = None
+    until = _stripped_or_none(getattr(args, "until", None))
+    if until:
+        try:
+            wake_at = kb.parse_wake_at(until)
+        except ValueError as exc:
+            return _err(str(exc), 2)
+    if getattr(args, "initial_status", "running") == "scheduled" and wake_at is None:
+        return _err("--initial-status scheduled needs --until WHEN (e.g. --until 2026-10-18 or --until +30d)", 2)
     with kbc.connect_closing() as conn:
         task_id = kb.create_task(
             conn, title=args.title, body=args.body, assignee=args.assignee,
@@ -371,6 +380,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             goal_max_turns=getattr(args, "goal_max_turns", None),
             completion_contract=getattr(args, "completion_contract", None),
             initial_status=getattr(args, "initial_status", "running"),
+            wake_at=wake_at,
             creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                              if is_dispatcher_owned_worker_context() else None),
         )
@@ -945,10 +955,19 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     reason = _joined_words(args.reason)
     author = _profile_author()
     ids = _bulk_ids(args)
+    wake_at = None
+    until = _stripped_or_none(getattr(args, "until", None))
+    if until:
+        try:
+            wake_at = kb.parse_wake_at(until)
+        except ValueError as exc:
+            return _err(str(exc), 2)
+        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(wake_at))
+        reason = f"{reason} — wakes {stamp}" if reason else f"wakes {stamp}"
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
         op = _commented(conn, reason, author, "SCHEDULED", lambda tid: kb.schedule_task(
-            conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid)))
+            conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid), wake_at=wake_at))
         return _bulk_apply(ids, op, lambda tid: f"Scheduled {tid}{suffix}", lambda tid: f"cannot schedule {tid}")
 
 

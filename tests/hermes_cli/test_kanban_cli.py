@@ -41,6 +41,28 @@ def kanban_home(tmp_path, monkeypatch):
 
 
 
+def test_kanban_create_scheduled_until_sleeps_then_wakes(kanban_home):
+    """Talaria row 29: `create --initial-status scheduled --until +30d` is a
+    reminder card — asleep (not dispatchable, not blocked) until its date."""
+    import time as _time
+    payload = json.loads(kc.run_slash(
+        "create 'CRO follow-up: re-present Bid Banana' --assignee elt_cro --initial-status scheduled --until +30d --json"))
+    assert payload["status"] == "scheduled"
+    assert payload["wake_at"] >= int(_time.time()) + 30 * 86400 - 5
+    # Without --until the CLI refuses rather than parking a blocker.
+    assert "needs --until" in kc.run_slash("create 'no date' --assignee elt_cro --initial-status scheduled")
+    # `schedule --until` on an existing card stores the wake time and records it in the comment.
+    with kbc.connect() as conn:
+        t = kb.create_task(conn, title="existing", assignee="elt_cro")
+    out = kc.run_slash(f"schedule {t} ask again in a month --until 2099-01-02")
+    assert "wakes 2099-01-02 09:00" in out
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, t)
+        assert task.status == "scheduled" and task.wake_at is not None
+        assert t in kb.wake_due_tasks(conn, now=task.wake_at)  # the +30d card wakes too by 2099
+        assert kb.get_task(conn, t).status == "ready"
+
+
 def test_kanban_list_json_includes_session_id(kanban_home):
     """JSON output exposes `session_id` so external clients (Scarf, web
     dashboards) don't need a side query to filter by chat session."""

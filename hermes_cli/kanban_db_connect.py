@@ -817,6 +817,9 @@ _LATER_TASK_COLUMNS = (
     ("block_recurrences", "block_recurrences INTEGER NOT NULL DEFAULT 0"),
     # Spawn-time start fingerprint of worker_pid (PID-reuse guard; NULL = legacy row).
     ("worker_started_at", "worker_started_at INTEGER"),
+    # Talaria row 29: epoch seconds a ``scheduled`` card wakes at (dispatcher sweep
+    # promotes it); NULL = scheduled with no date (needs an explicit unblock).
+    ("wake_at", "wake_at INTEGER"),
 )
 
 _NOTIFY_SUB_COLUMNS = (

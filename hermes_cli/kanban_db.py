@@ -101,7 +101,7 @@ def _git_out(cwd: Path, *args: str, timeout: int = 30) -> Optional[str]:
 # --- Constants ---
 
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
-VALID_INITIAL_STATUSES = {"running", "blocked"}
+VALID_INITIAL_STATUSES = {"running", "blocked", "scheduled"}
 
 # Typed block reasons (routing in ``_route_block``); ``None`` = legacy un-typed.
 VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
@@ -727,6 +727,7 @@ class Task:
     block_kind: Optional[str] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
+    wake_at: Optional[int] = None            # Talaria row 29: scheduled cards wake at this epoch
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -756,7 +757,7 @@ _TASK_REQUIRED_COLUMNS = (
 _TASK_OPTIONAL_COLUMNS = (
     "branch_name", "project_id", "tenant", "result", "idempotency_key", "worker_pid",
     "max_runtime_seconds", "last_heartbeat_at", "current_run_id", "workflow_template_id",
-    "current_step_key", "max_retries", "session_id", "completion_contract",
+    "current_step_key", "max_retries", "session_id", "completion_contract", "wake_at",
 )
 # Text columns where "" is stored/read as "not set".
 _TASK_EMPTY_IS_NULL_COLUMNS = (
@@ -1255,11 +1256,15 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
+    wake_at: Optional[int] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
     Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
-    forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
+    forces ``triage``; ``initial_status="blocked"`` parks it for human ops;
+    ``initial_status="scheduled"`` + ``wake_at`` (epoch) makes the card sleep
+    until that time and wake on its own (Talaria row 29 — a reminder, not a
+    blocker).
     ``idempotency_key``: an existing non-archived task with the key is returned
     instead of a duplicate. ``max_runtime_seconds``: cap before the dispatcher
     SIGTERMs and re-queues. ``model_override``/``provider_override`` pin the
@@ -1282,6 +1287,8 @@ def create_task(
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
         raise ValueError(f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}")
+    if initial_status == "scheduled" and _opt_int(wake_at) is None:
+        raise ValueError("initial_status='scheduled' needs wake_at (when the card should wake)")
     # A project-scoped board anchors every new task to its project's repo
     # (deterministic worktree + branch) without each surface repeating it.
     # An explicit ``scratch`` (or ``project_id=""``) is a request for no project:
@@ -1354,8 +1361,8 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id, completion_contract
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, completion_contract, wake_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, priority,
@@ -1365,6 +1372,7 @@ def create_task(
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
                         1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        _opt_int(wake_at) if task_status == "scheduled" else None,
                     ),
                 )
                 for pid in parents:
@@ -1395,6 +1403,11 @@ def create_task(
                         task_id,
                         "blocked",
                         {"reason": "initial_status", "status": "blocked", "actor": created_by or "user"},
+                    )
+                if task_status == "scheduled":
+                    _append_event(
+                        conn, task_id, "scheduled",
+                        {"reason": "initial_status", "wake_at": _opt_int(wake_at), "actor": created_by or "user"},
                     )
                 if task_status == "todo":
                     # Parked behind an open parent: record why, exactly as
@@ -3538,7 +3551,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         # (the dispatcher's spawn/crash counter) IS reset — a deliberate unblock
         # is a fresh start for the retry budget.
         cur = conn.execute(
-            "UPDATE tasks SET status = ?, current_run_id = NULL, "
+            "UPDATE tasks SET status = ?, current_run_id = NULL, wake_at = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
             "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
         )
@@ -3821,20 +3834,23 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
 
 def schedule_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
-    expected_run_id: Optional[int] = None,
+    expected_run_id: Optional[int] = None, wake_at: Optional[int] = None,
 ) -> bool:
     """Park in ``scheduled`` (waiting on time, not a human; not dispatchable)
-    until ``unblock_task`` re-gates it."""
+    until ``unblock_task`` re-gates it — or, with ``wake_at`` (epoch seconds),
+    until the dispatcher's :func:`wake_due_tasks` sweep promotes it on its own
+    (Talaria row 29)."""
     with write_txn(conn):
-        params: list[Any] = [task_id]
+        params: list[Any] = [_opt_int(wake_at), task_id]
         sql = """
             UPDATE tasks
                SET status       = 'scheduled',
+                   wake_at      = ?,
                    claim_lock   = NULL,
                    claim_expires= NULL,
                    worker_pid   = NULL
              WHERE id = ?
-               AND status IN ('todo', 'ready', 'running', 'blocked')
+               AND status IN ('todo', 'ready', 'running', 'blocked', 'triage')
         """
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
@@ -3844,8 +3860,77 @@ def schedule_task(
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
         )
-        _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
+        payload: dict[str, Any] = {"reason": reason}
+        if _opt_int(wake_at) is not None:
+            payload["wake_at"] = _opt_int(wake_at)
+        _append_event(conn, task_id, "scheduled", payload, run_id=run_id)
         return True
+
+
+# Talaria row 29 — a card that sleeps until a date -----------------------------
+WAKE_HOUR_LOCAL = 9  # a bare date wakes the card at 09:00 local, not midnight
+
+
+def parse_wake_at(text: str, *, now: Optional[int] = None) -> int:
+    """``YYYY-MM-DD`` (09:00 local), ISO ``YYYY-MM-DDTHH:MM``, or a relative
+    ``+30d`` / ``+2w`` / ``+12h`` / ``+90m`` → epoch seconds, always in the
+    future (ValueError otherwise)."""
+    import datetime as _dt
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("when is required (YYYY-MM-DD, YYYY-MM-DDTHH:MM, or +30d/+2w/+12h)")
+    base = int(now if now is not None else time.time())
+    m = re.fullmatch(r"\+(\d+)([mhdw])", raw)
+    if m:
+        n = int(m.group(1)); unit = m.group(2)
+        secs = n * {"m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}[unit]
+        if secs <= 0:
+            raise ValueError("relative wake time must be positive")
+        return base + secs
+    when: Optional[_dt.datetime] = None
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            when = _dt.datetime.strptime(raw, "%Y-%m-%d").replace(hour=WAKE_HOUR_LOCAL)
+        else:
+            when = _dt.datetime.fromisoformat(raw)
+    except ValueError:
+        when = None
+    if when is None:
+        raise ValueError(f"cannot read wake time {raw!r} (use YYYY-MM-DD, YYYY-MM-DDTHH:MM, or +30d/+2w/+12h)")
+    if when.tzinfo is None:
+        when = when.astimezone()  # local wall clock → aware
+    epoch = int(when.timestamp())
+    if epoch <= base:
+        raise ValueError(f"wake time {raw!r} is in the past")
+    return epoch
+
+
+def wake_due_tasks(conn: sqlite3.Connection, *, now: Optional[int] = None) -> list[str]:
+    """Promote every ``scheduled`` card whose ``wake_at`` has passed (dispatcher
+    sweep, Talaria row 29). Each wakes through :func:`unblock_task` (parent
+    re-gating applies), gets a ``woke`` event and a comment the worker will read
+    so it knows why it is running now. Returns the woken ids."""
+    ts = int(now if now is not None else time.time())
+    rows = conn.execute(
+        "SELECT id, wake_at FROM tasks WHERE status = 'scheduled' AND wake_at IS NOT NULL AND wake_at <= ? "
+        "ORDER BY wake_at, id",
+        (ts,),
+    ).fetchall()
+    woken: list[str] = []
+    for row in rows:
+        tid = row["id"]
+        wake_at = _row_get(row, "wake_at")
+        if not unblock_task(conn, tid):
+            continue
+        with write_txn(conn):
+            _append_event(conn, tid, "woke", {"wake_at": wake_at, "at": ts})
+        try:
+            stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(wake_at or ts)))
+            add_comment(conn, tid, "scheduler", f"WOKE | this card slept until {stamp} and is now due — carry on with the task as written.")
+        except Exception:
+            _log.debug("kanban wake: comment failed for %s", tid, exc_info=True)
+        woken.append(tid)
+    return woken
 
 
 # --- Worker context builder (what a spawned worker sees) ---

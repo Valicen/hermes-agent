@@ -200,7 +200,13 @@ _SPECS = [
         _arg("--initial-status", choices=sorted(kb.VALID_INITIAL_STATUSES), default="running",
              help="Initial card status. Use 'blocked' for cards "
                   "that require immediate human ops (R3 gate) "
-                  "to skip the brief running-to-blocked transition."),
+                  "to skip the brief running-to-blocked transition. "
+                  "Use 'scheduled' WITH --until for a card that must not run before a "
+                  "date (a reminder / follow-up / re-present-on): it sleeps, then wakes "
+                  "and dispatches on its own — never park a date-gated card as blocked."),
+        _arg("--until", metavar="WHEN",
+             help="When a --initial-status scheduled card wakes: YYYY-MM-DD (09:00 local), "
+                  "YYYY-MM-DDTHH:MM, or +30d / +2w / +12h."),
         _json_flag(help="Emit JSON output"),
     ], help="Create a new task"),
     _cmd("swarm", [
@@ -308,7 +314,11 @@ _SPECS = [
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason/timing note (also appended as a comment)"),
         _bulk_ids("schedule"),
-    ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
+        _arg("--until", metavar="WHEN",
+             help="Wake time: YYYY-MM-DD (09:00 local), YYYY-MM-DDTHH:MM, or +30d / +2w / +12h. "
+                  "The dispatcher promotes the card by itself when it passes; without --until "
+                  "the card sleeps until someone runs `kanban unblock`."),
+    ], help="Park one or more tasks in Scheduled (waiting on time, not human input); --until wakes it automatically"),
     _cmd("unblock", [
         _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),
         _TASK_IDS,

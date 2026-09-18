@@ -442,13 +442,25 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "dispatcher SIGTERMs the worker and re-queues the "
                 "task with outcome='timed_out'."
         )),
+        "until": {
+            "type": "string",
+            "description": (
+                "With initial_status 'scheduled': when the card wakes and dispatches on its "
+                "own — 'YYYY-MM-DD' (09:00 local), 'YYYY-MM-DDTHH:MM', or '+30d' / '+2w' / '+12h'. "
+                "This is how a reminder, follow-up or 'ask again on <date>' is expressed: the "
+                "card sleeps in Scheduled (not an alert for anyone) and wakes by itself."
+            ),
+        },
         "initial_status": {
             "type": "string",
-            "enum": ["running", "blocked"],
+            "enum": ["running", "blocked", "scheduled"],
             "description": (
                 "Initial card status. Use 'blocked' for tasks that "
                 "require immediate human ops (R3 gate) to skip the "
-                "brief running-to-blocked transition. Defaults to "
+                "brief running-to-blocked transition. Use 'scheduled' WITH 'until' "
+                "for any card that must not run before a date (a reminder / "
+                "re-present-on / follow-up) — never park a date-gated card as "
+                "blocked, that raises a false alarm for the operator. Defaults to "
                 "'running', which preserves the usual dispatch path."
             ),
         },

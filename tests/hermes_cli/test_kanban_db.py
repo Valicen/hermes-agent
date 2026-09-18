@@ -204,6 +204,59 @@ def test_schedule_task_parks_time_delay_without_dispatching(kanban_home):
         assert any(e.kind == "scheduled" and e.payload == {"reason": "run next week"} for e in events)
 
 
+def test_scheduled_card_with_wake_at_wakes_on_sweep_and_not_before(kanban_home):
+    """Talaria row 29: a date-gated card sleeps in ``scheduled`` and the dispatcher
+    sweep promotes it once ``wake_at`` passes — a reminder, not a blocker."""
+    now = int(time.time())
+    with kbc.connect() as conn:
+        t = kb.create_task(conn, title="re-present Bid Banana", assignee="elt_cro")
+        assert kb.schedule_task(conn, t, reason="ask again in a month", wake_at=now + 3600) is True
+        assert kb.get_task(conn, t).status == "scheduled"
+        assert kb.get_task(conn, t).wake_at == now + 3600
+        assert kb.claim_task(conn, t) is None
+        assert kb.wake_due_tasks(conn, now=now) == []
+        assert kb.get_task(conn, t).status == "scheduled"
+        assert kb.wake_due_tasks(conn, now=now + 3601) == [t]
+        woken = kb.get_task(conn, t)
+        assert woken.status == "ready"
+        assert woken.wake_at is None
+        assert "woke" in [e.kind for e in kb.list_events(conn, t)]
+        assert any(c.author == "scheduler" and c.body.startswith("WOKE |") for c in kb.list_comments(conn, t))
+        assert kb.wake_due_tasks(conn, now=now + 7200) == []
+
+
+def test_create_task_initial_status_scheduled_requires_and_stores_wake_at(kanban_home):
+    now = int(time.time())
+    with kbc.connect() as conn:
+        with pytest.raises(ValueError):
+            kb.create_task(conn, title="no date", assignee="ops", initial_status="scheduled")
+        t = kb.create_task(conn, title="follow-up", assignee="ops", initial_status="scheduled", wake_at=now + 86400)
+        task = kb.get_task(conn, t)
+        assert task.status == "scheduled" and task.wake_at == now + 86400
+        assert any(e.kind == "scheduled" and e.payload.get("wake_at") == now + 86400 for e in kb.list_events(conn, t))
+        assert kb.wake_due_tasks(conn, now=now) == []
+        t2 = kb.create_task(conn, title="manual", assignee="ops")
+        assert kb.schedule_task(conn, t2, reason="until told") is True
+        # Far future: only the dated card wakes; the undated one stays asleep until unblocked.
+        assert kb.wake_due_tasks(conn, now=now + 10 ** 9) == [t]
+        assert kb.get_task(conn, t2).status == "scheduled"
+        assert kb.unblock_task(conn, t2) is True
+
+
+def test_parse_wake_at_accepts_dates_and_relative_offsets():
+    import datetime as _dt
+    now = 1_800_000_000
+    assert kb.parse_wake_at("+30d", now=now) == now + 30 * 86400
+    assert kb.parse_wake_at("+2w", now=now) == now + 14 * 86400
+    assert kb.parse_wake_at("+12h", now=now) == now + 12 * 3600
+    future = (_dt.datetime.now() + _dt.timedelta(days=40)).strftime("%Y-%m-%d")
+    got = _dt.datetime.fromtimestamp(kb.parse_wake_at(future))
+    assert got.strftime("%Y-%m-%d") == future and got.hour == kb.WAKE_HOUR_LOCAL
+    for bad in ("2020-01-01", "next month", ""):
+        with pytest.raises(ValueError):
+            kb.parse_wake_at(bad)
+
+
 
 
 
