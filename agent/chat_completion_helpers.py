@@ -1304,6 +1304,18 @@ def _reasoning_config_for_wire(agent):
     """
     cfg = agent.reasoning_config
     ephemeral_off = _consume_ephemeral_reasoning_off(agent)
+    # Talaria row 28 (2026-09-18): behind a ROUTER (openrouter/auto) the model is
+    # unknown until it answers, and a reasoning-mandatory route (DeepSeek Pro,
+    # GLM, several GPT tiers) 400s on ``reasoning: {enabled: false}`` INSIDE the
+    # stream — after create() returned — where the one-shot recovery above
+    # cannot see it, so the loop re-sent the identical disable three times and
+    # the turn died (Argus PM chat, 14:15). A disable is never sent to a router:
+    # the request goes out without a reasoning config and the routed model
+    # applies its own default. Pinned models keep the configured disable.
+    if str(getattr(agent, "model", "") or "").strip().lower() in ("openrouter/auto", "auto") and isinstance(cfg, dict) and (
+        cfg.get("enabled") is False or str(cfg.get("effort") or "").lower() == "none"
+    ):
+        cfg = None
     if getattr(agent, "_reasoning_disable_rejected", False):
         # The route rejects disables. Resend exactly what the session has
         # been sending — the user's own config — so the retry lands on the

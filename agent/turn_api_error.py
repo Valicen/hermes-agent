@@ -119,6 +119,13 @@ def handle_api_error(
         context_length=_ctx_len, num_messages=len(api_messages) if api_messages else 0,
         base_url=str(getattr(agent, "base_url", "") or ""),
     )
+    # Talaria row 28: a reasoning-mandatory rejection that surfaced from the STREAM
+    # (after create() succeeded) never reached _create_with_reasoning_recovery. Mark
+    # the session here so the very next attempt omits every thinking-disable
+    # (_reasoning_config_for_wire) instead of replaying the same 400.
+    if getattr(classified, "reason", None) == FailoverReason.reasoning_mandatory and not getattr(agent, "_reasoning_disable_rejected", False):
+        agent._reasoning_disable_rejected = True
+        logger.warning("%sreasoning-mandatory route (stream-surfaced): dropping thinking-disable for the rest of this session and retrying", getattr(agent, "log_prefix", ""))
     # Talaria row 20: a model that answered with a rate limit / overload behind
     # openrouter/auto is excluded for the rest of the session, so the next retry is
     # routed to another model in the same band (website/docs/developer-guide/routing-policy.md,
