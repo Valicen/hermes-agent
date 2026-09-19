@@ -87,9 +87,14 @@ _MEMBER_CONTROL_FRAME_RE = re.compile(
     re.IGNORECASE,
 )
 _MEMBER_CONTROL_FRAME_RELABEL = "[member-quoted "
+# Round/position digits must cover the Talaria ceilings (MAX_ROUNDS_CEILING = 8 → r0..r7,
+# rosters up to ROOM_MEMBER ceiling → p0..p9). Upstream's ``r[0-2]``/``p[0-5]`` matched only
+# its own constants: with ``rooms.discussion.max_rounds: 4`` the round-3 task could not be
+# reconstructed for publication, the room stayed "working" forever and every receipts call
+# failed with "turn_id is not a Discussion coordinate" (War Room 2026-09-19 09:24, row 25 fix).
 _TURN_ID_RE = re.compile(
-    r"^d(?P<source>[1-9][0-9]*)\.r(?P<round>[0-2])\."
-    r"p(?P<position>[0-5])\.s(?P<seen>[1-9][0-9]*)\."
+    r"^d(?P<source>[1-9][0-9]*)\.r(?P<round>[0-9])\."
+    r"p(?P<position>[0-9])\.s(?P<seen>[1-9][0-9]*)\."
     r"m(?P<member>[0-9a-f]{24})$")
 
 _TARGET_FIELDS = {
@@ -724,6 +729,10 @@ def reconstruct_task_plan(
         raise DiscussionReconstructionError("driver task payload shape changed")
     if (match := _TURN_ID_RE.fullmatch(identity.turn_id)) is None:
         raise DiscussionReconstructionError("turn_id is not a Discussion coordinate")
+    if int(match.group("round")) >= MAX_ROUNDS_CEILING:
+        raise DiscussionReconstructionError("turn_id round exceeds the discussion ceiling")
+    if int(match.group("position")) >= len(room.members):
+        raise DiscussionReconstructionError("turn_id position exceeds the roster")
     source_event_seq = int(match.group("source"))
     if payload.get("source_event_seq") != source_event_seq:
         raise DiscussionReconstructionError("task source event does not match turn_id")

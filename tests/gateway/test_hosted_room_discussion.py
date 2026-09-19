@@ -835,3 +835,19 @@ def test_row27_mentioned_mode_is_still_the_default(room_db):
     _settle_next(room, db, text="The answer is ready for the user.")
     decision = discussion.plan_next_task(room, _events(db), local_profiles=LOCAL_PROFILES)
     assert decision.status == "settled" and decision.reason == "silent_round"
+
+
+def test_row25_turn_id_accepts_every_configured_round_and_position():
+    """War Room 2026-09-19: ``rooms.discussion.max_rounds: 4`` produced a round-3 task whose
+    ``turn_id`` (``…r3…``) failed ``_TURN_ID_RE`` (upstream ``r[0-2]``); publication of that
+    terminal task raised on every service tick, the room reported one turn running forever and
+    the composer stayed locked. The regex must cover the ceilings row 25 allows."""
+    from gateway import hosted_room_discussion as d
+    member = "0123456789abcdef01234567"
+    for rnd in range(d.MAX_ROUNDS_CEILING):
+        for pos in range(6):
+            assert d._TURN_ID_RE.fullmatch(f"d1.r{rnd}.p{pos}.s1.m{member}"), (rnd, pos)
+    assert d._TURN_ID_RE.fullmatch(f"d1.r3.p4.s17.m{member}").group("round") == "3"
+    assert d._TURN_ID_RE.fullmatch(f"d1.r10.p0.s1.m{member}") is None, "two-digit rounds stay out"
+    assert d._TURN_ID_RE.fullmatch(f"d1.r0.p0.s0.m{member}") is None, "seen watermark starts at 1"
+
