@@ -851,3 +851,39 @@ def test_row25_turn_id_accepts_every_configured_round_and_position():
     assert d._TURN_ID_RE.fullmatch(f"d1.r10.p0.s1.m{member}") is None, "two-digit rounds stay out"
     assert d._TURN_ID_RE.fullmatch(f"d1.r0.p0.s0.m{member}") is None, "seen watermark starts at 1"
 
+
+# --- Talaria row 30: notices inform, they never open a Discussion -----------------------------
+def _append_notice(db: Path, *, event_id: str, text: str, thread_id: str = "thread-1", legacy: bool = False) -> dict:
+    payload = {"text": text, "thread_id": thread_id}
+    if not legacy:
+        payload["notice"] = True
+    return hosted_rooms.append_event(
+        db, room_id=ROOM_ID, event_id=event_id, kind="message.user",
+        actor={"kind": "user", "id": "argus"}, authority_gateway_id=GATEWAY_ID, authority_epoch=1,
+        payload=payload, now=time.time())
+
+
+def test_row30_notice_user_messages_never_open_a_discussion(room_db):
+    db, room = room_db
+    _append_notice(db, event_id="n-1", text="[Argus] Kanban t_0badf00d completed by @ops — readout.")
+    _append_notice(db, event_id="n-2", text="[Argus] Kanban t_c0ffee00 completed.", thread_id="kanban-t_c0ffee00", legacy=True)
+    decision = discussion.plan_next_task(room, _events(db), local_profiles=LOCAL_PROFILES)
+    assert decision.status == "idle" and decision.reason == "no_pending_user_event"
+    # A real user message still opens one, and members see the notice as thread context.
+    _append_user(db, event_id="user-1", text="Any concerns?")
+    decision = discussion.plan_next_task(room, _events(db), local_profiles=LOCAL_PROFILES)
+    assert decision.status == "task"
+    prompt = decision.task.payload["prompt"]
+    assert "Notice (for information, no reply expected): [Argus] Kanban t_0badf00d" in prompt
+    assert "User (user): Any concerns?" in prompt
+
+
+def test_row30_notice_payload_validation():
+    assert discussion.validate_user_payload({"text": "x", "thread_id": "t-1", "notice": True}) == {
+        "text": "x", "thread_id": "t-1", "notice": True}
+    assert discussion.validate_user_payload({"text": "x", "thread_id": "t-1"}) == {"text": "x", "thread_id": "t-1"}
+    with pytest.raises(discussion.DiscussionValidationError):
+        discussion.validate_user_payload({"text": "x", "thread_id": "t-1", "notice": False})
+    with pytest.raises(discussion.DiscussionValidationError):
+        discussion.validate_user_payload({"text": "x", "thread_id": "t-1", "quiet": True})
+

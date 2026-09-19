@@ -104,6 +104,13 @@ _REMOTE_MEMBER_FIELDS = frozenset({
     "connectionId", "connectionKind", "connectionLabel", "connection_id", "connection_kind", "connection_label",
     "remoteSource", "route", "sourceMissing", "sourceReachable", "sourceScoped", "targetProfile", "target_profile"})
 _USER_PAYLOAD_FIELDS = frozenset({"text", "thread_id"})
+# Talaria row 30: ``notice: true`` marks a user message as information only — it is logged and
+# shown to members as thread context, but it never opens a Discussion. Argus posts kanban
+# completion receipts this way; before the flag existed they were posted on ``kanban-t_xxxxxxxx``
+# threads and each one started a full member debate (War Room 2026-09-19, 9 receipts → 9
+# discussions). Those legacy threads are treated as notices too.
+_USER_PAYLOAD_OPTIONAL_FIELDS = frozenset({"notice"})
+_LEGACY_NOTICE_THREAD_RE = re.compile(r"^kanban-t_[0-9a-f]{8}$")
 _TURN_COORDINATE_FIELDS = frozenset(
     {"discussion_event_id", "member_id", "member_index", "round_index", "task_id", "thread_id", "turn_id", })
 _MEMBER_MESSAGE_FIELDS = _TURN_COORDINATE_FIELDS | {"text"}
@@ -243,10 +250,25 @@ def _all_failure_reasons() -> frozenset[str]:
 
 def validate_user_payload(value: Any) -> dict[str, Any]:
     """Validate and normalize the exact ``message.user`` Discussion payload."""
-    payload = _exact_fields(value, label="user payload", required=_USER_PAYLOAD_FIELDS)
-    return {
+    payload = _exact_fields(
+        value, label="user payload", required=_USER_PAYLOAD_FIELDS, optional=_USER_PAYLOAD_OPTIONAL_FIELDS)
+    normalized = {
         "text": _text(payload["text"], label="user payload text", max_bytes=MAX_USER_TEXT_BYTES),
         "thread_id": _identifier(payload["thread_id"], label="thread_id")}
+    if "notice" in payload:
+        if payload["notice"] is not True:
+            raise DiscussionValidationError("user payload notice must be true when present")
+        normalized["notice"] = True
+    return normalized
+
+
+def is_notice_event(event: Any) -> bool:
+    """A ``message.user`` that informs but never opens a Discussion (Talaria row 30)."""
+    kind = getattr(event, "kind", None) or (event.get("kind") if isinstance(event, Mapping) else None)
+    if kind != "message.user":
+        return False
+    payload = getattr(event, "payload", None) or (event.get("payload") if isinstance(event, Mapping) else None) or {}
+    return payload.get("notice") is True or bool(_LEGACY_NOTICE_THREAD_RE.fullmatch(str(payload.get("thread_id") or "")))
 
 
 def _validate_member_target(value: Any, *, profile: str, known_profiles: set[str], index: int) -> dict[str, Any]:
@@ -548,6 +570,8 @@ def _rotate(members: Sequence[DiscussionMember], round_index: int) -> tuple[Disc
 
 def _format_message(event: _ValidatedEvent, room: DiscussionRoom) -> str:
     if event.kind == "message.user":
+        if is_notice_event(event):
+            return f"Notice (for information, no reply expected): {event.payload['text']}"
         return f"User (user): {event.payload['text']}"
     text = _MEMBER_CONTROL_FRAME_RE.sub(_MEMBER_CONTROL_FRAME_RELABEL, event.payload["text"])
     return f"@{_member_by_id(room, event.payload['member_id']).handle}: {text}"
@@ -621,7 +645,8 @@ def _pending_discussion(validated: Sequence[_ValidatedEvent]) -> _ValidatedEvent
         str(event.payload["discussion_event_id"]) for event in validated
         if event.kind == "room.activity" and event.payload.get("status") in {"settled", "bounded"}}
     latest_by_thread = {
-        str(event.payload["thread_id"]): event for event in validated if event.kind == "message.user"}
+        str(event.payload["thread_id"]): event for event in validated
+        if event.kind == "message.user" and not is_notice_event(event)}
     return next((
         event for event in sorted(latest_by_thread.values(), key=lambda item: item.seq)
         if event.seq > stopped_through_seq and event.event_id not in completed_discussion_ids), None)
@@ -835,7 +860,7 @@ def plan_publication(
     if status == "deferred":
         _bounded_int(execution_generation, message="deferred publication requires an execution generation", low=1)
     newer_same_thread = any(
-        event.kind == "message.user" and event.seq > task.seen_through_seq
+        event.kind == "message.user" and not is_notice_event(event) and event.seq > task.seen_through_seq
         and event.payload.get("thread_id") == task.identity.thread_id for event in validated)
     effective_status: TerminalKind = ("cancelled" if newer_same_thread and status != "deferred" else status)
     digest = task.identity.task_id.removeprefix("dtask:")
