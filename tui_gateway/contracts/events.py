@@ -183,6 +183,10 @@ class MessageCompletePayload(Payload):
     recoverable: bool | None = None
     error_surface: ErrorSurface | None = None
     partial: bool | None = None
+    # Talaria row 6 stamps the model that actually served the turn; the wire
+    # contract must accept the producer field or validation drops/flags a real
+    # completion event before clients can recover it.
+    model: str | None = None
 
 
 event("message.complete", MessageCompletePayload, doc="The turn ended: final text, usage and outcome.")
