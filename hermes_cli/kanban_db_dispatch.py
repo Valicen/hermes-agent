@@ -118,6 +118,10 @@ class DispatchResult:
     Code terminal like ``orion-cc``), not a Hermes profile. Expected steady-state
     on multi-lane setups, NOT operator-actionable; tracked apart so health
     telemetry can tell "stuck" from "correctly idle"."""
+    prerequisite_blocked: list[tuple[str, str, tuple[tuple[str, str], ...]]] = field(default_factory=list)
+    """Review tasks stopped before claim/spawn because a forced worker skill is
+    absent, archived, or operator-disabled. Entries are ``(task_id, assignee,
+    ((skill, state), ...))``; no run or retry budget is consumed."""
     skipped_per_profile_capped: list[tuple[str, str, int]] = field(default_factory=list)
     """``(task_id, assignee, current_running_count)`` deferred because the
     assignee is at ``kanban.max_in_progress_per_profile``. Picked up on a later
@@ -1842,6 +1846,85 @@ def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -
         return spawn_fn(task, workspace)
 
 
+def _worker_skill_prerequisite_issues(
+    assignee: str, skill_names: list[str],
+) -> list[tuple[str, str]]:
+    """Return ``(skill, state)`` for unavailable forced worker skills.
+
+    The probe runs under the assignee's actual HERMES_HOME and uses the same
+    loader as ``hermes --skills``. A profile-resolution failure remains the
+    existing nonspawnable-profile concern rather than being mislabeled as a
+    skill failure.
+    """
+    try:
+        from agent.skill_commands import build_preloaded_skills_prompt
+        from agent.skill_utils import get_disabled_skill_names
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+
+        home = Path(resolve_profile_env(normalize_profile_name(assignee)))
+        token = set_hermes_home_override(str(home))
+        try:
+            _prompt, _loaded, missing = build_preloaded_skills_prompt(skill_names)
+            disabled = get_disabled_skill_names()
+        finally:
+            reset_hermes_home_override(token)
+    except (FileNotFoundError, ValueError):
+        return []
+
+    archived_names: set[str] = set()
+    archive_root = home / "skills" / ".archive"
+    if archive_root.is_dir():
+        with contextlib.suppress(OSError):
+            archived_names = {path.parent.name for path in archive_root.rglob("SKILL.md")}
+    return [
+        (
+            name,
+            "disabled" if name in disabled
+            else "archived" if name in archived_names
+            else "absent",
+        )
+        for name in missing
+    ]
+
+
+def _block_review_prerequisite(
+    conn: sqlite3.Connection,
+    task_id: str,
+    assignee: str,
+    issues: tuple[tuple[str, str], ...],
+) -> None:
+    """Park a review task before claim/spawn without consuming a run/retry."""
+    detail = ", ".join(f"{name} ({state})" for name, state in issues)
+    reason = (
+        f"Review prerequisite unavailable for profile {assignee}: {detail}. "
+        "Restore/enable the required skill, then unblock; review was not bypassed and no worker was spawned."
+    )
+    with _kb.write_txn(conn):
+        changed = conn.execute(
+            "UPDATE tasks SET status = 'blocked', block_kind = 'capability', "
+            "block_recurrences = 1, last_failure_error = ? "
+            "WHERE id = ? AND status = 'review' AND claim_lock IS NULL",
+            (reason[:500], task_id),
+        ).rowcount
+        if changed:
+            _kb._append_event(
+                conn,
+                task_id,
+                "blocked",
+                {
+                    "reason": reason,
+                    "kind": "capability",
+                    "source_status": "review",
+                    "recurrences": 1,
+                    "dispatch_preflight": True,
+                    "required_skills": [
+                        {"name": name, "state": state} for name, state in issues
+                    ],
+                },
+            )
+
+
 def _dispatch_lane_task(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -1876,6 +1959,14 @@ def _dispatch_lane_task(
         current = per_profile_running.get(assignee, 0)
         if current >= per_profile_cap:
             result.skipped_per_profile_capped.append((task_id, assignee, current))
+            return False
+    if lane == "review":
+        issues = _worker_skill_prerequisite_issues(assignee, ["sdlc-review"])
+        if issues:
+            issue_tuple = tuple(issues)
+            result.prerequisite_blocked.append((task_id, assignee, issue_tuple))
+            if not dry_run:
+                _block_review_prerequisite(conn, task_id, assignee, issue_tuple)
             return False
     guard_reason = check_respawn_guard(conn, task_id, lane=lane)
     if guard_reason is not None:

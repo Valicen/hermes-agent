@@ -600,6 +600,97 @@ def test_review_dispatch_preserves_task_skills_and_adds_reviewer_skill(
     assert captured == [["domain-specific-review", "sdlc-review"]]
 
 
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("absent", [("sdlc-review", "absent")]),
+        ("archived", [("sdlc-review", "archived")]),
+        ("disabled", [("sdlc-review", "disabled")]),
+        ("available", []),
+    ],
+)
+def test_review_skill_preflight_uses_effective_profile_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    expected: list[tuple[str, str]],
+) -> None:
+    import hermes_cli.profiles as profmod
+    import tools.skills_tool as skills_tool
+
+    home = tmp_path / state
+    (home / "skills").mkdir(parents=True)
+    if state in {"available", "disabled"}:
+        skill_dir = home / "skills" / "sdlc-review"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: sdlc-review\ndescription: Review changes.\n---\n\n# Review\n",
+            encoding="utf-8",
+        )
+    elif state == "archived":
+        skill_dir = home / "skills" / ".archive" / "sdlc-review"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: sdlc-review\ndescription: Review changes.\n---\n\n# Review\n",
+            encoding="utf-8",
+        )
+    (home / "config.yaml").write_text(
+        "skills:\n  disabled:\n    - sdlc-review\n" if state == "disabled" else "skills: {}\n",
+        encoding="utf-8",
+    )
+    skills_tool._SKILLS_CACHE.clear()
+    monkeypatch.setattr(profmod, "resolve_profile_env", lambda _name: str(home))
+
+    assert kbd._worker_skill_prerequisite_issues("reviewer", ["sdlc-review"]) == expected
+
+
+def test_review_skill_preflight_blocks_before_claim_or_spawn(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda _name: True)
+    monkeypatch.setattr(
+        cfgmod, "load_config", lambda *args, **kwargs: {"kanban": {"review_dispatch": True}},
+    )
+    monkeypatch.setattr(
+        kbd,
+        "_worker_skill_prerequisite_issues",
+        lambda *_args: [("sdlc-review", "archived")],
+    )
+    spawned = []
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="review prerequisite", assignee="reviewer")
+        implementation = kb.claim_task(conn, task_id)
+        assert implementation is not None
+        assert kb.request_review(
+            conn, task_id, summary="ready", expected_run_id=implementation.current_run_id,
+        )
+        before_runs = conn.execute(
+            "SELECT count(*) FROM task_runs WHERE task_id = ?", (task_id,)
+        ).fetchone()[0]
+        result = kbd.dispatch_once(conn, spawn_fn=lambda *args: spawned.append(args))
+        task = kb.get_task(conn, task_id)
+        after_runs = conn.execute(
+            "SELECT count(*) FROM task_runs WHERE task_id = ?", (task_id,)
+        ).fetchone()[0]
+        event = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+
+    assert not spawned
+    assert task is not None and task.status == "blocked"
+    assert task.consecutive_failures == 0
+    assert before_runs == after_runs
+    assert result.prerequisite_blocked == [
+        (task_id, "reviewer", (("sdlc-review", "archived"),))
+    ]
+    assert event is not None and '"dispatch_preflight": true' in event[0]
+
+
 def test_review_dispatch_honors_global_and_per_profile_caps(
     kanban_home: Path,
     monkeypatch: pytest.MonkeyPatch,
