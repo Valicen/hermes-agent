@@ -2372,6 +2372,11 @@ def _make_agent(
     # Load hooks alongside the same profile config used to construct this agent.
     from agent.shell_hooks import register_from_config
     register_from_config(cfg)
+    # Talaria row 31 (2026-09-24): outbound webhooks too. cli.py and gateway/run_startup.py register
+    # both kinds; the hosted (dashboard/TUI) path registered only shell hooks, so a ``hooks.outbound``
+    # target never fired for a browser chat. Idempotent per (home, event, url) — safe per agent build.
+    from agent.outbound_webhooks import register_from_config as register_outbound_webhooks
+    register_outbound_webhooks(cfg)
     system_prompt = _startup_system_prompt(cfg, session_id or key)
     model, runtime = _resolve_agent_model_runtime(model_override, provider_override)
     _pr = _load_provider_routing()
