@@ -1,4 +1,5 @@
 import asyncio
+import json
 import pytest
 
 from pathlib import Path
@@ -759,6 +760,74 @@ async def test_gateway_create_autosubscribes_on_explicit_board(kanban_home):
         assert kbn.list_notify_subs(conn) == []
     finally:
         conn.close()
+
+
+@pytest.mark.asyncio
+async def test_cli_create_from_gateway_context_preserves_currency_and_delivers_completion_once(
+    kanban_home, monkeypatch,
+):
+    """A model fallback through ``hermes kanban create --json`` still carries
+    the gateway origin. The CLI must preserve argument text, subscribe that
+    origin, and let repeated notifier ticks deliver one completion only."""
+    from gateway.config import Platform
+    from gateway.run import GatewayRunner
+
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "chat-currency")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_TYPE", "dm")
+    monkeypatch.setenv("HERMES_SESSION_USER_ID", "owner-1")
+    monkeypatch.setenv("HERMES_SESSION_PROFILE", "default")
+
+    output = kc.run_slash(
+        'create "FIN | Log $37.99 Uber expense" --assignee worker1 --json'
+    )
+    created = json.loads(output)
+    task_id = created["id"]
+
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        assert task.title == "FIN | Log $37.99 Uber expense"
+        subs = kbn.list_notify_subs(conn, task_id)
+        assert len(subs) == 1
+        assert subs[0]["delivery_mode"] == "notify+wake"
+        assert kb.complete_task(conn, task_id, summary="Expense verified.")
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._kanban_sub_fail_counts = {}
+    runner._kanban_notifier_profile = "default"
+    runner._owns_kanban_dispatcher_lock = lambda: True
+    runner._profile_adapters = {}
+    object.__setattr__(runner, "config", SimpleNamespace(multiplex_profiles=False))
+    delivered: list[str] = []
+
+    async def _send(_chat_id, message, metadata=None):
+        delivered.append(message)
+
+    adapter = MagicMock()
+    adapter.send = AsyncMock(side_effect=_send)
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._authorization_adapter = lambda platform, profile=None: adapter
+
+    real_sleep = asyncio.sleep
+    tick_count = 0
+
+    async def _fast_sleep(_seconds):
+        nonlocal tick_count
+        await real_sleep(0)
+        tick_count += 1
+        if tick_count >= 4:
+            runner._running = False
+
+    wake_mock = AsyncMock()
+    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep), \
+         patch("gateway.wake.deliver_wake", new=wake_mock):
+        await asyncio.wait_for(runner._kanban_notifier_watcher(interval=1), timeout=10.0)
+
+    assert len(delivered) == 1
+    assert "$37.99" in delivered[0]
+    wake_mock.assert_awaited_once()
 
 
 @pytest.mark.parametrize(

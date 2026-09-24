@@ -384,6 +384,13 @@ def _cmd_create(args: argparse.Namespace) -> int:
             creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                              if is_dispatcher_owned_worker_context() else None),
         )
+        # ``hermes kanban create`` may be invoked by a gateway agent through
+        # the terminal fallback rather than through the structured
+        # ``kanban_create`` tool. The terminal exports the originating
+        # HERMES_SESSION_* route, so retain the same durable report-back edge.
+        # A plain human CLI has no route and remains unsubscribed.
+        from tools.kanban_tools import _maybe_auto_subscribe
+        _maybe_auto_subscribe(conn, task_id)
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
         _print_json(_task_to_dict(task))
