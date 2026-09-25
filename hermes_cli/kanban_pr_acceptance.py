@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from typing import Any
 from urllib.parse import quote
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -22,15 +23,27 @@ def validate_contract(value: str | None) -> str:
     return value
 
 
-def _api(endpoint: str, *, query: str | None = None, paginate: bool = False):
+def _api(endpoint: str, *, query: str | None = None, paginate: bool = False) -> Any:
     command = ["gh", "api", endpoint, "--hostname", "github.com"]
     if query is not None:
         command += ["-f", "query=" + query]
     if paginate:
-        command += ["--paginate", "--slurp"]
+        # gh prints each page as a consecutive JSON value. Parse that stream
+        # directly instead of requiring --slurp, which is absent from older
+        # supported gh releases (including Debian's 2.46 package).
+        command.append("--paginate")
     result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
                             text=True, timeout=30, check=True)
-    value = json.loads(result.stdout)
+    decoder, values, offset = json.JSONDecoder(), [], 0
+    while offset < len(result.stdout):
+        while offset < len(result.stdout) and result.stdout[offset].isspace():
+            offset += 1
+        if offset < len(result.stdout):
+            value, offset = decoder.raw_decode(result.stdout, offset)
+            values.append(value)
+    if not values or (not paginate and len(values) != 1):
+        raise ValueError("GitHub returned incomplete JSON evidence")
+    value = values if paginate else values[0]
     if isinstance(value, dict) and value.get("errors"):
         raise ValueError("GitHub returned incomplete GraphQL evidence")
     return value
