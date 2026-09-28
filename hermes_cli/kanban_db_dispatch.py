@@ -601,7 +601,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
     host_prefix = _kb._host_prefix()
 
     rows = conn.execute(
-        "SELECT t.id, t.worker_pid, t.worker_started_at, "
+        "SELECT t.id, t.current_run_id, t.worker_pid, t.worker_started_at, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
         "       t.max_runtime_seconds, t.claim_lock "
         "FROM tasks t "
@@ -645,11 +645,13 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
 
         error = f"elapsed {int(elapsed)}s > limit {limit}s"
         with _kb.write_txn(conn):
-            owned = conn.execute("SELECT id FROM tasks WHERE id=? AND status='running' AND worker_pid=? AND claim_lock IS ?",
-                                 (tid, pid, row["claim_lock"])).fetchone()
+            owned = conn.execute("SELECT id FROM tasks WHERE id=? AND status='running' AND worker_pid=? "
+                                 "AND claim_lock IS ? AND current_run_id IS ?",
+                                 (tid, pid, row["claim_lock"], row["current_run_id"])).fetchone()
             if owned is None:
                 continue
             retry_status = _kb._retry_status_for_run(conn, tid)
+            source_status = retry_status
             from hermes_cli.kanban_recovery import checkpoint_after_worker_loss
             recovery_pending = checkpoint_after_worker_loss(conn, tid, "budget", error)
             if recovery_pending:
@@ -669,6 +671,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
                     "limit_seconds": limit,
                     "sigkill": killed,
                     "retry_status": retry_status,
+                    "source_status": source_status,
                     "recovery_pending": recovery_pending,
                 }
                 run_id = _kb._end_run(
@@ -708,7 +711,8 @@ def detect_stale_running(
     Stale = running longer than ``stale_timeout_seconds`` (active run's
     ``started_at``, else ``tasks.started_at``) AND ``last_heartbeat_at`` NULL or
     older than ``_STALE_HEARTBEAT_GAP_SECONDS``. Task returns to its source
-    phase, run closes ``outcome='stale'``, a live host-local worker is killed.
+    phase unless saved progress requires reconciliation (blocked); run closes
+    ``outcome='stale'``, a live host-local worker is killed.
     ``0`` disables the check; ``signal_fn`` is a test hook. Deliberately NOT
     counted via ``_record_task_failure``: an absent heartbeat is not a worker
     failure, and counting it would let long-running tasks trip the breaker.
@@ -720,7 +724,7 @@ def detect_stale_running(
     reclaimed: list[str] = []
 
     rows = conn.execute(
-        "SELECT t.id, t.worker_pid, t.worker_started_at, t.last_heartbeat_at, t.claim_lock, "
+        "SELECT t.id, t.current_run_id, t.worker_pid, t.worker_started_at, t.last_heartbeat_at, t.claim_lock, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
@@ -756,7 +760,18 @@ def detect_stale_running(
             continue
 
         with _kb.write_txn(conn):
-            retry_status = _kb._retry_status_for_run(conn, tid)
+            owned = conn.execute(
+                "SELECT 1 FROM tasks WHERE id=? AND status='running' AND current_run_id IS ? "
+                "AND claim_lock IS ? AND worker_pid IS ? AND last_heartbeat_at IS ?",
+                (tid, row["current_run_id"], row["claim_lock"], pid, last_hb),
+            ).fetchone()
+            if owned is None:
+                continue
+            source_status = _kb._retry_status_for_run(conn, tid)
+            from hermes_cli.kanban_recovery import checkpoint_after_worker_loss
+            recovery_pending = checkpoint_after_worker_loss(
+                conn, tid, "worker_death", "Worker heartbeat expired; reconcile saved work before resume", notify=True)
+            retry_status = "blocked" if recovery_pending else source_status
             cur = conn.execute(
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
@@ -775,6 +790,8 @@ def detect_stale_running(
                 "timeout_seconds": stale_timeout_seconds,
                 "pid": int(pid) if pid else None,
                 "retry_status": retry_status,
+                "source_status": source_status,
+                "recovery_pending": recovery_pending,
             }
             payload.update(termination)
 
@@ -800,14 +817,15 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
     A task ``running`` with NULL ``claim_lock``/``claim_expires`` (crash
     mid-claim, manual SQL, DB restore) is a zombie forever: ``release_stale_claims``
     needs ``claim_expires``, ``detect_crashed_workers`` needs a host-local lock +
-    pid, ``detect_stale_running`` is off by default. Orphans go back to ``ready``
-    with a comment, leaked run closed, ``reconciled`` event; a row with a live
+    pid, ``detect_stale_running`` is off by default. Orphans return to their source
+    phase, or block for checkpoint reconciliation, with a comment, leaked run
+    closed, ``reconciled`` event; a row with a live
     host-local PID is deferred so no duplicate spawns beside it.
     """
     now = int(time.time())
     reconciled: list[str] = []
     rows = conn.execute(
-        "SELECT id, claim_lock, claim_expires, worker_pid, worker_started_at FROM tasks "
+        "SELECT id, current_run_id, claim_lock, claim_expires, worker_pid, worker_started_at FROM tasks "
         "WHERE status = 'running' "
         "  AND (claim_lock IS NULL OR claim_expires IS NULL)"
     ).fetchall()
@@ -822,18 +840,33 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
             )
             continue
         with _kb.write_txn(conn):
+            owned = conn.execute(
+                "SELECT 1 FROM tasks WHERE id=? AND status='running' AND current_run_id IS ? "
+                "AND claim_lock IS ? AND claim_expires IS ? AND worker_pid IS ?",
+                (tid, row["current_run_id"], row["claim_lock"], row["claim_expires"], pid),
+            ).fetchone()
+            if owned is None:
+                continue
+            source_status = _kb._retry_status_for_run(conn, tid)
+            from hermes_cli.kanban_recovery import checkpoint_after_worker_loss
+            recovery_pending = checkpoint_after_worker_loss(
+                conn, tid, "worker_death", "Worker claim bookkeeping lost; reconcile saved work before resume", notify=True)
+            retry_status = "blocked" if recovery_pending else source_status
             cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
                 "last_heartbeat_at = NULL "
                 "WHERE id = ? AND status = 'running' "
                 "  AND claim_lock IS ? AND claim_expires IS ?",
-                (tid, row["claim_lock"], row["claim_expires"]),
+                (retry_status, tid, row["claim_lock"], row["claim_expires"]),
             )
             if cur.rowcount != 1:
                 continue
             payload = {
                 "reason": "orphaned_running",
+                "retry_status": retry_status,
+                "source_status": source_status,
+                "recovery_pending": recovery_pending,
                 "claim_lock": row["claim_lock"],
                 "claim_expires": _kb._opt_int(row["claim_expires"]),
                 "worker_pid": int(pid) if pid else None,
@@ -848,7 +881,7 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
             _kb._insert_comment(
                 conn, tid, "dispatcher",
                 "reconciliation: card was 'running' with no valid claim "
-                "(dead/gone worker) — requeued to ready",
+                f"(dead/gone worker) — moved to {retry_status}",
                 now,
             )
             _kb._append_event(conn, tid, "reconciled", payload, run_id=run_id)
@@ -1119,6 +1152,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 assignee=_kb._row_get(row, "assignee"), started_at=started_at,
             )
             retry_status = _kb._retry_status_for_run(conn, row["id"])
+            dead.event_payload["source_status"] = retry_status
             from hermes_cli.kanban_recovery import checkpoint_after_worker_loss
             recovery_pending = not dead.rate_limited and checkpoint_after_worker_loss(
                 conn, row["id"], "worker_death", "Worker exited without a terminal handoff; reconcile saved work and detached actions")

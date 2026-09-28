@@ -2465,7 +2465,7 @@ def release_stale_claims(
     reclaimed = 0
     host_prefix = _host_prefix()
     stale = conn.execute(
-        "SELECT id, claim_lock, worker_pid, worker_started_at, claim_expires, last_heartbeat_at, "
+        "SELECT id, current_run_id, claim_lock, worker_pid, worker_started_at, claim_expires, last_heartbeat_at, "
         "       assignee "
         "FROM tasks "
         "WHERE status = 'running' AND claim_expires IS NOT NULL "
@@ -2494,7 +2494,19 @@ def release_stale_claims(
             )
             continue
         with write_txn(conn):
-            retry_status = _retry_status_for_run(conn, row["id"])
+            owned = conn.execute(
+                "SELECT 1 FROM tasks WHERE id=? AND status='running' AND current_run_id IS ? "
+                "AND claim_lock IS ? AND claim_expires IS ? AND worker_pid IS ? AND last_heartbeat_at IS ?",
+                (row["id"], row["current_run_id"], row["claim_lock"], row["claim_expires"],
+                 row["worker_pid"], row["last_heartbeat_at"]),
+            ).fetchone()
+            if owned is None:
+                continue
+            source_status = _retry_status_for_run(conn, row["id"])
+            from hermes_cli.kanban_recovery import checkpoint_after_worker_loss
+            recovery_pending = checkpoint_after_worker_loss(
+                conn, row["id"], "worker_death", "Worker claim expired; reconcile saved work before resume", notify=True)
+            retry_status = "blocked" if recovery_pending else source_status
             cur = conn.execute(
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
@@ -2516,18 +2528,21 @@ def release_stale_claims(
                     "host_local": host_local,
                     "heartbeat_stale": bool(heartbeat_stale),
                     "retry_status": retry_status,
+                    "source_status": source_status,
+                    "recovery_pending": recovery_pending,
                 },
             )
             reclaimed += 1
         # Own txn, after the reclaim commit (same shape as ``enforce_max_runtime``):
         # the run ended without a verdict, so it counts toward the breaker and a
         # trip flips the task to ``blocked`` + ``gave_up`` on top of ``reclaimed``.
-        _record_task_failure(
-            conn, row["id"], f"stale_lock={row['claim_lock']}",
-            outcome="reclaimed", failure_limit=failure_limit,
-            release_claim=False, end_run=False,
-            event_payload_extra={"worker_pid": _opt_int(row["worker_pid"]), "retry_status": retry_status},
-        )
+        if not recovery_pending:
+            _record_task_failure(
+                conn, row["id"], f"stale_lock={row['claim_lock']}",
+                outcome="reclaimed", failure_limit=failure_limit,
+                release_claim=False, end_run=False,
+                event_payload_extra={"worker_pid": _opt_int(row["worker_pid"]), "retry_status": retry_status},
+            )
         # Post-commit observer; every non-reclaim branch ``continue``d above.
         if _kanban_observer_consumed("on_kanban_worker_stale_claim"):
             _fire_kanban_lifecycle_hook(

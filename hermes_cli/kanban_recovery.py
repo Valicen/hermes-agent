@@ -99,7 +99,7 @@ def save_checkpoint(conn, task_id, *, run_id, data, classification=None, reason=
         return {"event_id": event_id, "run_id": run_id, **payload}
 
 
-def checkpoint_after_worker_loss(conn, task_id, classification, reason):
+def checkpoint_after_worker_loss(conn, task_id, classification, reason, *, notify=False):
     """Dispatcher transaction only, after it has established worker loss/timeout.
 
     Retain the last checkpoint verbatim; never infer live state from dispatcher
@@ -114,6 +114,14 @@ def checkpoint_after_worker_loss(conn, task_id, classification, reason):
     kb._append_event(conn, task_id, "checkpoint_saved", payload, run_id=previous["run_id"])
     conn.execute("UPDATE tasks SET block_kind='capability', last_failure_error=? WHERE id=?",
                  (f"{classification}: {reason}; progress saved; owner={data['owner']}; reconcile detached operations", task_id))
+    if notify:
+        # Reclaim events are not an attention lane. Use one existing blocked event;
+        # callers hold the ownership-fenced transaction and leave running atomically.
+        kb._append_event(conn, task_id, "blocked", {
+            "reason": f"{reason}; progress saved; owner={data['owner']}; next={data['next_command']}; reconcile runtime and detached actions",
+            "kind": "capability", "classification": classification,
+            "source_status": kb._retry_status_for_run(conn, task_id),
+        }, run_id=previous["run_id"])
     return True
 
 

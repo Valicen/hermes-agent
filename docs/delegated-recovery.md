@@ -42,8 +42,19 @@ Workers must enrich the checkpoint before risky or long-running work.
   notification subscriptions. Existing prompt-cache/role order is preserved.
 - At iteration exhaustion the exact run pauses, not a generic spawn failure.
   A stale finalizer cannot consume a newer claim. The dispatcher pauses workers
-  with saved checkpoints after death/runtime expiry. Legacy workers without
-  checkpoints retain the existing bounded retry behavior.
+  with saved checkpoints after death/runtime expiry, heartbeat expiry, orphaned
+  bookkeeping or expired claims. These paths retain the source review phase on
+  resume. Legacy workers without checkpoints retain existing bounded retries.
+- Heartbeat/orphan/TTL reclaim checks the selected exact run and claim state in
+  the write transaction before saving recovery; a concurrent cancellation or
+  review/replacement claim wins without a stale dispatcher overwriting it. One
+  blocked event uses existing notification delivery; repeated sweeps do not repeat it.
+- The turn-end stop guard reads exact run ownership without initializing or
+  repairing the board. Closed runs never get instructed to complete/block their
+  successor. Only successful terminal tool results count when board state cannot
+  be established; an attempted or refused call is not success. Review handoff,
+  changes requested and checkpoint pause are terminal alongside complete/block.
+  Unknown ownership prompts a readback, not a claim that the task is still running.
 - No new task/daemon is automatically spawned. The requester either bounds the
   remaining work or decomposes it with existing parent/idempotency mechanisms.
   No indefinite budget reset or automatic retry chain exists here.
