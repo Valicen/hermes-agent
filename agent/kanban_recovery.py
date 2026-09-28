@@ -119,7 +119,10 @@ def before_iteration(agent, messages):
             saved = latest_checkpoint(conn, identity[0])
             if saved and saved["run_id"] == identity[1] and saved["requires_reconciliation"]:
                 return True
-            task = conn.execute("SELECT status, current_run_id FROM tasks WHERE id=?", (identity[0],)).fetchone()
+            task = conn.execute(
+                "SELECT t.status, t.current_run_id, t.max_runtime_seconds, r.started_at "
+                "FROM tasks t LEFT JOIN task_runs r ON r.id=t.current_run_id WHERE t.id=?",
+                (identity[0],)).fetchone()
             if task is None or (task["status"] != "done" and (
                     task["status"] != "running" or task["current_run_id"] != identity[1])):
                 agent._kanban_recovery_notice = "This worker no longer owns the running claim. Stopping without further execution; inspect the task's current outcome and owner before any continuation."
@@ -139,7 +142,9 @@ def before_iteration(agent, messages):
                                             budget.max_total - 1))
         runtime, started = getattr(agent, "run_budget_seconds", None), getattr(agent, "_run_budget_started_at", None)
         near_time = bool(runtime and started and time.time() - started >= .8 * runtime)
-        if (near_turn or near_time) and not getattr(agent, "_recovery_budget_saved", False):
+        near_task_time = bool(task and task["max_runtime_seconds"] and task["started_at"]
+                              and time.time() - task["started_at"] >= .8 * task["max_runtime_seconds"])
+        if (near_turn or near_time or near_task_time) and not getattr(agent, "_recovery_budget_saved", False):
             agent._recovery_budget_saved = bool(checkpoint_from_env(
                 classification="budget", reason="Approaching configured budget; save evidence and decompose remaining work before exhaustion",
                 attention=True,

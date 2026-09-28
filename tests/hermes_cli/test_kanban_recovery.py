@@ -235,3 +235,13 @@ def test_status_edit_cannot_bypass_recovery_claim_fence(worker):
         conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
     assert kbd.check_respawn_guard(conn, tid) == "recovery_reconciliation_required"
     assert kb.claim_task(conn, tid) is None
+
+
+def test_task_runtime_warning_does_not_require_agent_runtime_configuration(worker):
+    conn, tid, rid = worker
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET max_runtime_seconds=100 WHERE id=?", (tid,))
+        conn.execute("UPDATE task_runs SET started_at=? WHERE id=?", (int(time.time()) - 85, rid))
+    assert not before_iteration(SimpleNamespace(), [])
+    assert len([e for e in kb.list_events(conn, tid) if e.kind == "checkpoint_attention"]) == 1
+    assert kb.get_task(conn, tid).status == "running"
