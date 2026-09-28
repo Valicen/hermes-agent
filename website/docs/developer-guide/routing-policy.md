@@ -234,6 +234,33 @@ interactive `high`, premium models only via `/tier max`, Bedrock never.
 | Route is not OpenRouter (zeus, Anthropic direct) | untouched |
 | Band has no available endpoint for the prompt | OpenRouter picks another model in the band; it does not fail (unlike `max_price`) |
 
+## Jev Router (`typesafe/jev-router`) — 2026-09-28, Talaria row 40
+
+OpenRouter's Jev Router (TypeSafe AI, listed 2026-09-21) is a second router
+model: you send an ordinary chat request and Jev picks the served model and
+reasoning effort. The Valicen fleet moved every profile to it on 2026-09-28
+(CHG-20260928-09). What this policy does and does not do on that route:
+
+- **The `plugins[auto-router]` fragment is emitted only for `openrouter/auto`**,
+  and it would not matter: probed 2026-09-28, Jev ignores `cost_tier`
+  (low and max both served `openai/gpt-6-sol` for a hard prompt),
+  `excluded_models` and `provider.order`. Bands, the price ceiling, `/tier`
+  and rate-limit substitution therefore do not apply on Jev profiles. The
+  Argus tier picker shows the session as pinned, which is the truthful state.
+- `provider.ignore` / caching-provider preferences are still sent (they are
+  not gated on the model), but Jev's own provider choice wins.
+- **Router aliasing (row 40):** `typesafe/jev-router` joins `openrouter/auto`
+  in the two places that must know "the served model is unknown until it
+  answers": the envelope cache-marker opt-in
+  (`agent/agent_runtime_helpers.py`) and the never-send-a-reasoning-disable
+  rule (`agent/chat_completion_helpers.py`, row 28).
+- Observed picks (12.9k-token prefix): trivial, tool and diagnosis prompts →
+  `openai/gpt-6-luna`; web-search agent loop → `openai/gpt-6-sol`; hard
+  reasoning with no tools → `gpt-6-sol`. Served model stayed constant within
+  a session and prompt caching worked.
+- Rollback is a config change (`openrouter/auto`) plus gateway restarts; keep
+  `~/.hermes/scripts/model_freshness_monitor.py` in step or 04:15 reverts it.
+
 ## Upstream posture
 
 Valicen-specific by construction (fleet file layout, our tier defaults), so
