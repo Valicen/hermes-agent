@@ -1312,7 +1312,8 @@ def _reasoning_config_for_wire(agent):
     # the turn died (Argus PM chat, 14:15). A disable is never sent to a router:
     # the request goes out without a reasoning config and the routed model
     # applies its own default. Pinned models keep the configured disable.
-    if str(getattr(agent, "model", "") or "").strip().lower() in ("openrouter/auto", "auto") and isinstance(cfg, dict) and (
+    # Talaria row 40: typesafe/jev-router is a router as well (Jev picks model + effort per request).
+    if str(getattr(agent, "model", "") or "").strip().lower() in ("openrouter/auto", "auto", "typesafe/jev-router") and isinstance(cfg, dict) and (
         cfg.get("enabled") is False or str(cfg.get("effort") or "").lower() == "none"
     ):
         cfg = None

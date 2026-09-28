@@ -1562,7 +1562,9 @@ def anthropic_prompt_cache_policy(
     # claude-opus-5, 165 requests, 0 cache reads, $61.52). Opt the auto alias into the
     # envelope layout: Anthropic serves honour the markers, other providers tolerate
     # them. (Valicen local patch, Talaria row 1.)
-    is_auto_router = is_openrouter and model_lower in ("openrouter/auto", "auto")
+    # Talaria row 40 (2026-09-28): typesafe/jev-router is a router too — served model unknown
+    # until it answers, so it takes the same envelope opt-in as openrouter/auto.
+    is_auto_router = is_openrouter and model_lower in ("openrouter/auto", "auto", "typesafe/jev-router")
     if (is_openrouter or is_nous_portal) and (is_claude or is_kimi or is_auto_router) and not is_anthropic_wire:
         return True, False
     # Nous Portal Qwen takes the envelope path too; the alibaba-family check below only matches
