@@ -852,6 +852,67 @@ def _handle_attachments(args: dict, **kw) -> str:
                 _fields(a, _ATTACHMENT_FIELDS) for a in kb.list_attachments(conn, tid)]})
 
 
+_MIN_TASK_RUNTIME_SECONDS = 60
+
+
+def _assignee_skills_root(assignee: str):
+    """``<profile home>/skills`` for *assignee*, or None when the assignee has no profile dir
+    (decision tickets for ``david``, test fixtures) — then there is nothing to validate against."""
+    from pathlib import Path
+    try:
+        from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+        return Path(resolve_profile_env(normalize_profile_name(assignee))) / "skills"
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
+def _skill_installed_under(skills_root, name: str) -> bool:
+    """True when a ``<name>/SKILL.md`` lives under *skills_root* (any category depth), ignoring
+    dot-directories such as ``.archive`` — the same tree the worker's preload resolver reads."""
+    leaf = name.strip().strip("/").split("/")[-1]
+    if not leaf or skills_root is None or not skills_root.is_dir():
+        return False
+    for skill_md in skills_root.rglob("SKILL.md"):
+        rel = skill_md.relative_to(skills_root).parts
+        if any(part.startswith(".") for part in rel):
+            continue
+        if skill_md.parent.name == leaf:
+            return True
+    return False
+
+
+def _validate_create_guards(assignee: str, skills, max_runtime_seconds) -> None:
+    """Talaria row 41 (2026-09-28): two kanban_create arguments that turn a card into an
+    unretryable crash loop are rejected at the tool boundary, where the model can correct them.
+
+    * ``max_runtime_seconds`` 0 (or anything under a minute) is stored verbatim and the dispatcher
+      reads it as ``limit 0s`` → ``timed_out`` on its first sweep (t_51d83f09 run 451).
+    * a ``skills`` pin the ASSIGNEE profile does not have makes every run exit 1 with
+      ``Unknown skill(s)`` before the first turn (run 452); the creator's own skill tree is not
+      the assignee's. Validated against ``<assignee home>/skills`` plus ``skills.external_dirs``.
+    """
+    _check(max_runtime_seconds is None or max_runtime_seconds >= _MIN_TASK_RUNTIME_SECONDS,
+           f"max_runtime_seconds must be at least {_MIN_TASK_RUNTIME_SECONDS} (omit it for the board "
+           "default); 0 is not 'no limit' — the dispatcher times the worker out on its first check")
+    if not skills:
+        return
+    skills_root = _assignee_skills_root(assignee)
+    if skills_root is None:
+        return
+    extra_roots = []
+    try:
+        from agent.skill_utils import get_external_skills_dirs
+        extra_roots = list(get_external_skills_dirs())
+    except Exception:
+        extra_roots = []
+    for name in skills:
+        found = _skill_installed_under(skills_root, name) or any(
+            _skill_installed_under(root, name) for root in extra_roots)
+        _check(found, f"skill '{name}' is not installed for assignee '{assignee}' (no SKILL.md under "
+                      f"{skills_root}); pin only skills the assignee profile has, or omit 'skills' — an "
+                      "unknown pin crashes every run of the task before its first turn")
+
+
 @_kanban_handler("kanban_create")
 def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
@@ -873,6 +934,8 @@ def _handle_create(args: dict, **kw) -> str:
         _parse_bool_arg(args, "goal_mode"))
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
+    max_runtime_seconds = _opt_int(args.get("max_runtime_seconds"))
+    _validate_create_guards(str(assignee), skills, max_runtime_seconds)
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     with _board(args.get("board")) as (kb, conn):
         from tools.async_delegation import _current_origin_session_id
@@ -896,7 +959,7 @@ def _handle_create(args: dict, **kw) -> str:
             project_source_task_id=project_source_task_id, triage=triage,
             creator_task_id=self_tid,
             idempotency_key=args.get("idempotency_key"),
-            max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
+            max_runtime_seconds=max_runtime_seconds, skills=skills,
             model_override=model_override, provider_override=provider_override,
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
             completion_contract=args.get("completion_contract"),

@@ -1231,3 +1231,51 @@ def test_attach_url_happy_path_public_host(worker_env, default_url_guard, monkey
         assert Path(atts[0].stored_path).read_bytes() == payload
     finally:
         conn.close()
+
+
+# ---- Talaria row 41: create guards (zero runtime, skill pins the assignee lacks) ----
+
+def _assignee_profile(name: str):
+    """Create a minimal profile dir for *name* under the fixture's fleet root; returns its skills dir."""
+    from pathlib import Path
+    from hermes_cli.profiles import resolve_profile_env
+    home = Path(os.environ["HERMES_HOME"])
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    skills = root / "profiles" / name / "skills"
+    skills.mkdir(parents=True, exist_ok=True)
+    assert resolve_profile_env(name) == str(root / "profiles" / name)
+    return skills
+
+
+def test_create_rejects_zero_max_runtime(worker_env):
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "t", "assignee": "peer", "max_runtime_seconds": 0}))
+    assert out.get("ok") is not True
+    assert "max_runtime_seconds" in json.dumps(out)
+    ok = json.loads(kt._handle_create({"title": "t", "assignee": "peer", "max_runtime_seconds": 600}))
+    assert ok["ok"] is True
+
+
+def test_create_rejects_skill_pin_the_assignee_lacks(worker_env):
+    from tools import kanban_tools as kt
+    skills = _assignee_profile("director")
+    (skills / "finance" / "director-ops").mkdir(parents=True)
+    (skills / "finance" / "director-ops" / "SKILL.md").write_text("---\nname: director-ops\n---\nx\n")
+    (skills / ".archive" / "old-skill").mkdir(parents=True)
+    (skills / ".archive" / "old-skill" / "SKILL.md").write_text("---\nname: old-skill\n---\nx\n")
+    bad = json.loads(kt._handle_create({"title": "t", "assignee": "director",
+                                        "skills": ["financial-record-reconciliation"]}))
+    assert bad.get("ok") is not True and "not installed for assignee 'director'" in json.dumps(bad)
+    archived = json.loads(kt._handle_create({"title": "t", "assignee": "director", "skills": ["old-skill"]}))
+    assert archived.get("ok") is not True
+    good = json.loads(kt._handle_create({"title": "t", "assignee": "director", "skills": ["director-ops"]}))
+    assert good["ok"] is True
+    nested = json.loads(kt._handle_create({"title": "t", "assignee": "director", "skills": ["finance/director-ops"]}))
+    assert nested["ok"] is True
+
+
+def test_create_skips_skill_validation_without_profile_dir(worker_env):
+    """Decision tickets for ``david`` (no profile dir) keep accepting any skills list."""
+    from tools import kanban_tools as kt
+    out = json.loads(kt._handle_create({"title": "t", "assignee": "david", "skills": ["anything"]}))
+    assert out["ok"] is True
