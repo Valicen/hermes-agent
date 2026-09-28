@@ -2615,6 +2615,25 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
         _kb._log.debug("kanban worker: legacy session retag skipped (%s)", exc)
 
 
+def _kanban_pin_for(profile_arg: str) -> Optional[dict]:
+    """``{"model": ..., "provider": ...}`` from ``profiles.<profile>.kanban_pin`` in the fleet
+    routing policy, or None. Read hot (the policy file is mtime-cached); any failure means
+    "no pin" — the dispatcher must never stall on a policy typo."""
+    try:
+        from agent.openrouter_routing import effective_policy
+        raw = (effective_policy(profile_arg) or {}).get("kanban_pin")
+    except Exception as exc:  # pragma: no cover - defensive
+        _kb._log.debug("kanban pin lookup skipped for %s (%s)", profile_arg, exc)
+        return None
+    if not isinstance(raw, dict):
+        return None
+    model = str(raw.get("model") or "").strip()
+    if not model:
+        return None
+    provider = str(raw.get("provider") or "").strip()
+    return {"model": model, "provider": provider or None}
+
+
 def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> list[str]:
     """Build the ``hermes -p <profile> --cli ... chat -q ...`` worker command."""
     cmd = [
@@ -2639,6 +2658,16 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
         # intended backend (model X with provider Y is the classic board-stall).
         if task.provider_override:
             cmd.extend(["--provider", task.provider_override])
+    else:
+        # Talaria row 42 (2026-09-28): a per-profile ``kanban_pin`` in routing-policy.yaml
+        # (``profiles.<name>.kanban_pin: {model, provider}``) decides the worker's model when
+        # the card carries no explicit override — deterministic executor routing that does
+        # not depend on the profile default (Jev picks per request; a pin does not).
+        pin = _kanban_pin_for(profile_arg)
+        if pin:
+            cmd.extend(["-m", pin["model"]])
+            if pin.get("provider"):
+                cmd.extend(["--provider", pin["provider"]])
     # Independent of the model override — a task can run the profile's own
     # model at a different depth.
     if task.reasoning_effort:
