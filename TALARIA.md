@@ -91,6 +91,30 @@ left on the legacy names deliberately (aliases hold; row 13 normalizes its own l
 | 34 | `message.complete` contract accepts row 6's served-model stamp | The producer added `payload.model` in row 6 but the strict payload contract did not; live browser completion emitted a validation warning and made the terminal-frame boundary untrustworthy | tui_gateway/contracts/events.py, tests/tui_gateway/test_message_complete_contract.py | upstream carries both served-model stamping and its matching wire contract |
 | 35 | kanban CLI create retains the gateway origin subscription | A default-profile Telegram turn lacked the structured Kanban toolset and fell back to `hermes kanban create --json` through `terminal`; CLI create bypassed both gateway slash-command and structured-tool auto-subscribe paths, so completed task `t_0a55fe85` had no `kanban_notify_subs` row and never reported back. CLI create now consumes the terminal-exported `HERMES_SESSION_*` route through the same idempotent subscription helper; plain human CLI/cron contexts remain unsubscribed | hermes_cli/kanban.py, tests/hermes_cli/test_kanban_notify.py | CLI create made from a gateway-origin subprocess preserves a one-time completion/block report-back edge natively |
 
+## Release 2026-09-28 — row 37 (CHG-20260928-02)
+
+David authorized production rollout of exact reviewed candidate
+`560628c3cc6d1def3c8af4cce125b73fbbdc6594` in task `t_058a07e1`.
+The complete row-37 chain (`02229f8d1c`, `3ab137f570`, `dda0ca6d66`,
+`560628c3cc`) is promoted intact from `5afe34715d9d7469311c0088442777ee88d40891`;
+this release commit changes only this ledger, not reviewed code or tests.
+Rollback ref: `talaria-pre-row37-20260928-t058a07e1` at that pre-rollout head.
+
+| # | Commit (subject) | Why we carry it | Files | Drop when upstream… |
+|---|---|---|---|---|
+| 36 | gh pagination compatibility for PR acceptance (`5afe34715d`, previously recorded in FLOWS/CHG-20260925-07) | Debian gh lacks `--slurp`; parse consecutive JSON pages without weakening exact-head acceptance | hermes_cli/kanban_pr_acceptance.py and its tests | supports older gh pagination without misclassifying acceptance |
+| 37 | checkpoint delegated recovery, fence reclaim/resumptions and exact-run terminal handoffs | A closed worker must not complete/block a successor; worker loss needs durable checkpoints and operator reconciliation, preserving review provenance and existing consent gates | agent/kanban_recovery.py, kanban_stop.py, loop/finalizer/prompt hooks; hermes_cli/kanban_recovery.py, kanban_db.py, kanban_db_dispatch.py; tools/kanban_preflight.py, kanban_tools*.py, toolsets.py; gateway/kanban_watchers_notifier.py, tui_gateway/session_notifications.py; focused tests and docs/delegated-recovery.md | provides exact-run-fenced checkpoint/reclaim/resume and terminal handoff handling with equivalent denial, stale-owner, review and recovery coverage |
+
+Review `t_34e7aa4f` run 418 approved implementation run 416: 78 focused tests,
+567 lifecycle/dispatch tests and one Windows-only skip. Rollout preflight repeated
+78/78 at exact candidate. Evidence ZIP SHA-256:
+`982873e674d8fa06473b903ae16ae3d80fcba4424dbf892b1274266cd3bfc79f`.
+Canonical CHG/FLOWS record post-restart receipts. Candidate documentation retains
+its original pre-deployment provenance; this ledger records its production promotion.
+Known notifier-route baseline failure (`t_d18774f2`) and separate fix `54059296b7`
+are excluded; no full-repository green claim. Rollback preserves checkpoint events
+but old code does not enforce reconciliation: assess outstanding recovery first.
+
 ## Upstream PRs open
 
 #97407 skew guard · #97408 notify fallback · #97409 unconfirmed completion → review. (#97410 schema-cache TTL closed 2026-08-28 as a duplicate of #92621 — watch that one instead.) When one merges, the next `talaria sync` will report the corresponding commit as already-upstream: skip it and delete its row.
