@@ -878,7 +878,27 @@ def _skill_installed_under(skills_root, name: str) -> bool:
             continue
         if skill_md.parent.name == leaf:
             return True
+        # The loader resolves by frontmatter ``name:`` too (a Claude Design export ships
+        # ``name: valicen-design`` in a ``valicen-design-system/`` folder).
+        if _skill_frontmatter_name(skill_md) == leaf:
+            return True
     return False
+
+
+def _skill_frontmatter_name(skill_md) -> str:
+    try:
+        with open(skill_md, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return ""
+    if not head.startswith("---"):
+        return ""
+    for line in head.split("\n")[1:40]:
+        if line.strip() == "---":
+            break
+        if line.startswith("name:"):
+            return line.split(":", 1)[1].strip().strip("'\"")
+    return ""
 
 
 def _validate_create_guards(assignee: str, skills, max_runtime_seconds) -> None:

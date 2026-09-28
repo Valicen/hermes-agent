@@ -1279,3 +1279,17 @@ def test_create_skips_skill_validation_without_profile_dir(worker_env):
     from tools import kanban_tools as kt
     out = json.loads(kt._handle_create({"title": "t", "assignee": "david", "skills": ["anything"]}))
     assert out["ok"] is True
+
+
+def test_create_accepts_skill_pin_by_frontmatter_name(worker_env):
+    """A skill folder named differently from its frontmatter ``name:`` is pinnable by either."""
+    from tools import kanban_tools as kt
+    skills = _assignee_profile("webdev")
+    (skills / "web" / "valicen-design-system").mkdir(parents=True)
+    (skills / "web" / "valicen-design-system" / "SKILL.md").write_text("---\nname: valicen-design\ndescription: x\n---\nbody\n")
+    ok = json.loads(kt._handle_create({"title": "t", "assignee": "webdev", "skills": ["valicen-design"]}))
+    assert ok["ok"] is True
+    ok2 = json.loads(kt._handle_create({"title": "t", "assignee": "webdev", "skills": ["valicen-design-system"]}))
+    assert ok2["ok"] is True
+    bad = json.loads(kt._handle_create({"title": "t", "assignee": "webdev", "skills": ["valicen-designer"]}))
+    assert bad.get("ok") is not True
