@@ -645,7 +645,15 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
 
         error = f"elapsed {int(elapsed)}s > limit {limit}s"
         with _kb.write_txn(conn):
+            owned = conn.execute("SELECT id FROM tasks WHERE id=? AND status='running' AND worker_pid=? AND claim_lock IS ?",
+                                 (tid, pid, row["claim_lock"])).fetchone()
+            if owned is None:
+                continue
             retry_status = _kb._retry_status_for_run(conn, tid)
+            from hermes_cli.kanban_recovery import checkpoint_after_worker_loss
+            recovery_pending = checkpoint_after_worker_loss(conn, tid, "budget", error)
+            if recovery_pending:
+                retry_status = "blocked"
             cur = conn.execute(
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
@@ -661,6 +669,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
                     "limit_seconds": limit,
                     "sigkill": killed,
                     "retry_status": retry_status,
+                    "recovery_pending": recovery_pending,
                 }
                 run_id = _kb._end_run(
                     conn, tid, outcome="timed_out", status="timed_out",
@@ -671,7 +680,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         # Outside the write_txn above because ``_record_task_failure`` opens its
         # own. If the breaker trips this flips the task to ``blocked`` and emits
         # ``gave_up`` on top of the ``timed_out`` already emitted.
-        if cur.rowcount == 1:
+        if cur.rowcount == 1 and not recovery_pending:
             _record_task_failure(
                 conn, tid,
                 error=error,
@@ -1110,6 +1119,15 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 assignee=_kb._row_get(row, "assignee"), started_at=started_at,
             )
             retry_status = _kb._retry_status_for_run(conn, row["id"])
+            from hermes_cli.kanban_recovery import checkpoint_after_worker_loss
+            recovery_pending = not dead.rate_limited and checkpoint_after_worker_loss(
+                conn, row["id"], "worker_death", "Worker exited without a terminal handoff; reconcile saved work and detached actions")
+            if recovery_pending:
+                retry_status = "blocked"
+                dead.unconfirmed_completion = None
+                dead.event_kind = "crashed"
+                dead.error_text = "Worker exited without a terminal handoff; progress saved; operator reconciliation required"
+                dead.event_payload["recovery_pending"] = True
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
@@ -1137,7 +1155,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 "outcome": dead.run_outcome,
                 "retry_status": retry_status,
             })
-            if dead.rate_limited or dead.protocol_violation:
+            if (dead.rate_limited or dead.protocol_violation) and not recovery_pending:
                 # Stamp last_failure_error WITHOUT touching ``consecutive_failures``:
                 # a rate-limited requeue must show ``check_respawn_guard`` a quota
                 # blocker; a below-budget protocol violation never reaches
@@ -1147,7 +1165,9 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                     "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                     (dead.error_text[:500], row["id"]),
                 )
-            if dead.rate_limited:
+            if recovery_pending:
+                sweep.crashed.append(row["id"])
+            elif dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
             elif dead.unconfirmed_completion:
                 # Not a failure: the result is on the card. Hand off to review after the
@@ -1456,6 +1476,10 @@ def check_respawn_guard(
         return None
 
     now = int(time.time())
+
+    from hermes_cli.kanban_recovery import pending_recovery
+    if pending_recovery(conn, task_id):
+        return "recovery_reconciliation_required"
 
     # 1. Rate-limit cooldown — see docstring for why this precedes blocker_auth.
     #    LATEST run only: a newer crash/completion supersedes the rate-limit run.

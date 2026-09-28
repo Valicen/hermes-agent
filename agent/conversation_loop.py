@@ -1513,7 +1513,9 @@ def _run_conversation_turn(
     while (s.api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         if _run_phase(begin_iteration, agent, s).action == "break":
             break
-        _run_phase(prepare_iteration, agent, s)
+        if _run_phase(prepare_iteration, agent, s).action == "break":
+            s.final_response = getattr(agent, "_kanban_recovery_notice", None) or "Work paused. A recovery checkpoint is saved on the task; operator reconciliation is required before resume. Check the checkpoint for the exact blocker and next action."
+            break
         _run_phase(assemble_api_request, agent, s)
         _pg = _run_phase(run_preflight_gate, agent, s)
         if _pg.action == "return":

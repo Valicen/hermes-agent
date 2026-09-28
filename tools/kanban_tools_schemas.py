@@ -270,6 +270,20 @@ KANBAN_REQUEST_CHANGES_SCHEMA = _schema(
     ["reason"],
 )
 
+KANBAN_CHECKPOINT_SCHEMA = _schema(
+    "kanban_checkpoint",
+    "Save a run-fenced recovery checkpoint before long work or when blocked. Optional operations performs a non-executing lifecycle preflight in THIS worker context and pauses for an operator handoff: readiness unknown is not permission. Never include secrets. A checkpoint is not completion.",
+    {
+        "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+        "checkpoint": _prop("object", "Required fields: commits, dirty_files, evidence, detached_operations, blockers (lists); current_runtime, intended_runtime, next_command, rollback, owner (nonblank text). Mark unknown explicitly."),
+        "operations": {"type": "array", "items": {"type": "object"}, "description": "Before long lifecycle work: exact command, environment, action, authorization_provenance; units, required_capabilities, dependencies lists. Never executes input or grants approval. Always hands off unknown readiness before deployment."},
+        "classification": {"type": "string", "enum": ["operator_only", "auth", "policy", "transient", "budget", "worker_death"]},
+        "reason": _prop("string", "Actionable blocker or progress note."),
+        "pause": _prop("boolean", "Pause with durable handoff; requires classification and reason. Operations always pauses."),
+    },
+    ["checkpoint"],
+)
+
 KANBAN_HEARTBEAT_SCHEMA = _schema(
     "kanban_heartbeat",
     (
@@ -526,6 +540,7 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
     ),
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),
+        "recovery": _prop("object", "For recovery checkpoints: checkpoint_event_id, observed_at (Unix seconds, within 15 minutes), operator, evidence, runtime_observed, detached_observed, postconditions, next_action, authorization_provenance; in_flight=false and postconditions_passed=true. Attests observed state, never grants tool permission."),
     },
     ["task_id"],
 )

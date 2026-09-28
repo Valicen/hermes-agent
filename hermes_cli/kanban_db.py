@@ -2242,6 +2242,9 @@ def _claim_and_open_run(
 ) -> Optional[int]:
     """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
     when the CAS lost. Caller holds the txn."""
+    from hermes_cli.kanban_recovery import pending_recovery
+    if pending_recovery(conn, task_id):
+        return None
     cur = conn.execute(
         f"""
         UPDATE tasks
@@ -3524,11 +3527,14 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(conn: sqlite3.Connection, task_id: str, *, recovery: Optional[dict] = None) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
     when that is where it left off), closing any leaked run first."""
     now = int(time.time())
     with write_txn(conn):
+        from hermes_cli.kanban_recovery import reconcile_before_unblock
+        if _task_status(conn, task_id) == "blocked" and not reconcile_before_unblock(conn, task_id, recovery):
+            return False
         resume_status = (
             _resume_status_from_events(conn, task_id)
             if _task_status(conn, task_id) == "blocked"
@@ -3947,6 +3953,8 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     now = int(time.time())
     lines: list[str] = []
     _ctx_header(lines, task)
+    from hermes_cli.kanban_recovery import recovery_context
+    lines.append(recovery_context(conn, task_id))
     _ctx_attachments(lines, list_attachments(conn, task_id))
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)

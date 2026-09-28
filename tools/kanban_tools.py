@@ -20,7 +20,7 @@ from hermes_cli.goals import judge_goal
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from tools.kanban_tools_schemas import (
-    KANBAN_ATTACH_SCHEMA,
+    KANBAN_ATTACH_SCHEMA, KANBAN_CHECKPOINT_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
@@ -996,7 +996,8 @@ def _handle_unblock(args: dict, **kw) -> str:
     tid = str(tid)
     _enforce_worker_task_ownership(tid)
     with _board(args.get("board")) as (kb, conn):
-        _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked or unknown)")
+        _check(kb.unblock_task(conn, tid, recovery=args.get("recovery")),
+               f"could not unblock {tid}: recovery-blocked tasks require a fresh exact-checkpoint reconciliation receipt; otherwise not blocked or unknown")
         return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)))
 
 
@@ -1015,6 +1016,26 @@ def _handle_link(args: dict, **kw) -> str:
 
 # --- Registration (order preserved: it is the order tools appear in the schema) ---
 
+@_kanban_handler("kanban_checkpoint")
+def _handle_checkpoint(args: dict, **kw) -> str:
+    from hermes_cli.kanban_recovery import save_checkpoint, validate_checkpoint
+    from tools.kanban_preflight import inspect_operations
+
+    tid = _worker_guard("kanban_checkpoint", args)
+    run_id = _worker_run_id(tid)
+    _check(run_id is not None, "checkpoint requires a dispatcher-owned run")
+    data = validate_checkpoint(args.get("checkpoint"))
+    classification, reason = args.get("classification"), args.get("reason")
+    pause = _parse_bool_arg(args, "pause")
+    if args.get("operations") is not None:
+        data["preflight"] = inspect_operations(args["operations"])
+        classification, reason, pause = "operator_only", "Scoped lifecycle readiness is unknown; normal approval-capable operator handoff required before long execution", True
+    with _board(args.get("board")) as (kb, conn):
+        receipt = save_checkpoint(conn, tid, run_id=run_id, data=data,
+                                  classification=classification, reason=reason, pause=pause)
+        _check(receipt is not None, "checkpoint refused: stale run, cancelled or no longer running")
+        return _ok(task_id=tid, checkpoint=receipt, status=kb.get_task(conn, tid).status)
+
 # kanban_list / kanban_unblock route the board and are hidden from task workers.
 _ORCHESTRATOR_TOOLS = frozenset({"kanban_list", "kanban_unblock"})
 _TOOLS = (
@@ -1025,6 +1046,7 @@ _TOOLS = (
     ("kanban_request_review", KANBAN_REQUEST_REVIEW_SCHEMA, _handle_request_review, "👀"),
     ("kanban_request_changes", KANBAN_REQUEST_CHANGES_SCHEMA, _handle_request_changes, "↩"),
     ("kanban_heartbeat", KANBAN_HEARTBEAT_SCHEMA, _handle_heartbeat, "💓"),
+    ("kanban_checkpoint", KANBAN_CHECKPOINT_SCHEMA, _handle_checkpoint, "💾"),
     ("kanban_comment", KANBAN_COMMENT_SCHEMA, _handle_comment, "💬"),
     ("kanban_attach", KANBAN_ATTACH_SCHEMA, _handle_attach, "📎"),
     ("kanban_attach_url", KANBAN_ATTACH_URL_SCHEMA, _handle_attach_url, "📎"),

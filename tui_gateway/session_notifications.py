@@ -133,7 +133,7 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 
 # Mirror gateway/kanban_watchers.py TERMINAL_KINDS: claim silent kinds (archived/unblocked) too so the cursor advances
 # past them and they can't wedge a later completed/blocked event behind an unclaimed row.
-_KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked")
+_KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "checkpoint_attention")
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0  # /loop and /heartbeat share one idle-poll cadence
 
 
@@ -305,6 +305,8 @@ def _kb_completed(task, payload: dict, title: str) -> str:
 
 
 def _kb_timed_out(task, payload: dict, title: str) -> str:
+    if payload.get("recovery_pending"):
+        return " runtime budget exhausted; progress saved; operator reconciliation required before resume"
     with contextlib.suppress(TypeError, ValueError):
         return f" timed out (max_runtime={int(payload.get('limit_seconds') or 0)}s); will retry"
     return " timed out (max_runtime=0s); will retry"
@@ -316,7 +318,8 @@ _KANBAN_EVENT_FORMATTERS = {
     "blocked": ("⏸", lambda t, p, title: " blocked" + (f": {str(p.get('reason'))[:160]}" if p.get("reason") else "")),
     "gave_up": ("✖", lambda t, p, title: " gave up after repeated spawn failures"
                 + (f"\n{str(p.get('error'))[:200]}" if p.get("error") else "")),
-    "crashed": ("✖", lambda t, p, title: " worker crashed (pid gone); dispatcher will retry"),
+    "crashed": ("✖", lambda t, p, title: " worker stopped; progress saved; operator reconciliation required" if p.get("recovery_pending") else " worker crashed (pid gone); dispatcher will retry"),
+    "checkpoint_attention": ("💾", lambda t, p, title: " progress saved: " + str(p.get("reason") or "budget checkpoint")[:240]),
     "timed_out": ("⏱", _kb_timed_out),
     "status": ("🔄", lambda t, p, title: f" → {p.get('status') or ''}"),
 }

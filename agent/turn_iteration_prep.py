@@ -109,6 +109,10 @@ def prepare_iteration(
         apply_pending_wire_switch(agent)
 
     # Fire step_callback for gateway hooks (agent:step event).
+    from agent.kanban_recovery import before_iteration
+    if before_iteration(agent, messages):
+        return IterationPrep(action="break", messages=messages, request_logger=logger,
+                             current_turn_user_idx=current_turn_user_idx)
     if agent.step_callback is not None:
         try:
             agent.step_callback(api_call_count, _previous_tool_round(messages))

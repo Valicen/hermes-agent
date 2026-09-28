@@ -31,10 +31,10 @@ def _kbn():
 # "status" covers dashboard drag-drop and `_set_status_direct()`.
 # ``review_requested`` wakes the origin like a block but is not one;
 # the task is not archived so later review cycles keep notifying.
-TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
+TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "checkpoint_attention")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
-_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
+_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "checkpoint_attention")
 # Consecutive send failures (adapter raised OR reported SendResult(success=False))
 # before a sub is dropped as a dead chat. 12 ≈ 60s at the 5s cadence: a transient
 # API outage must not permanently unsubscribe a live review-gate channel.
@@ -493,6 +493,8 @@ def _fmt_gave_up(ev, n) -> tuple:
 
 
 def _fmt_timed_out(ev, n) -> tuple:
+    if _payload(ev, "recovery_pending"):
+        return f"⏸ {n.head} reached its runtime budget; progress saved, waiting for operator reconciliation before resume.", None, None
     limit = int(_payload(ev, "limit_seconds") or 0)
     minutes = max(1, round(limit / 60)) if limit else 0
     span = f"its {minutes}-minute limit" if minutes else "its time limit"
@@ -507,7 +509,12 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, "_KanbanNotification"], tuple]] = {
     "blocked": lambda ev, n: (f"⏸ {n.head} blocked{_clip(ev, 'reason', ': {}', 160)}", None, None),
     "gave_up": _fmt_gave_up,
     "crashed": lambda ev, n: (
-        f"✖ {n.head} — its worker stopped unexpectedly; it will be retried automatically.", None, None,
+        f"✖ {n.head} — its worker stopped unexpectedly; " +
+        ("progress saved, waiting for operator reconciliation before resume." if _payload(ev, "recovery_pending")
+         else "it will be retried automatically."), None, None,
+    ),
+    "checkpoint_attention": lambda ev, n: (
+        f"💾 {n.head} progress checkpoint saved: {_safe_review_reason(_payload(ev, 'reason'))}", None, None,
     ),
     "timed_out": _fmt_timed_out,
     "status": lambda ev, n: (f"🔄 {n.head} → {_payload(ev, 'status') or ''}", None, None),
