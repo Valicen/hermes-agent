@@ -101,6 +101,12 @@ def _denied_terminal(messages):
         except (TypeError, ValueError):
             continue
         if isinstance(result, dict) and result.get("status") == "blocked" and result.get("exit_code") == -1:
+            # Talaria row 39: only a dangerous-pattern gate (``pattern_key`` on the envelope) is a
+            # consent gate an operator can approve. Tirith scan findings and deny rules carry no
+            # approval path -- pausing on them only cycles pause -> reconcile -> same verdict; the
+            # tool's own advice ("find an alternative approach") stands and the worker continues.
+            if not result.get("pattern_key"):
+                continue
             # Do not persist the tool's blanket-approval advice. Preserve the exact
             # denied action, not an executable recipe for circumventing the gate.
             return args.get("command") if isinstance(args, dict) else None
@@ -116,6 +122,15 @@ def before_iteration(agent, messages):
         from hermes_cli import kanban_db_connect as kbc
         from hermes_cli.kanban_recovery import latest_checkpoint
         with kbc.connect_closing() as conn:
+            if not getattr(agent, "_kanban_session_stamped", False):
+                # Talaria row 39: write-once transcript pointer for this run (Argus opens it).
+                from hermes_cli.kanban_recovery import stamp_worker_session
+                session_id = getattr(agent, "session_id", None) or os.environ.get("HERMES_SESSION_ID")
+                stamp_worker_session(conn, identity[0], identity[1], session_id)
+                try:
+                    agent._kanban_session_stamped = True
+                except Exception:
+                    pass
             saved = latest_checkpoint(conn, identity[0])
             if saved and saved["run_id"] == identity[1] and saved["requires_reconciliation"]:
                 return True

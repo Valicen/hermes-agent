@@ -53,7 +53,7 @@ def machine_block_summary(classification, reason, data, event_id=None):
 
 
 def stamp_worker_session(conn, task_id, run_id, session_id):
-    """Talaria row 38: record the worker's own Hermes session id on its open run.
+    """Talaria row 39: record the worker's own Hermes session id on its open run.
 
     Fenced to the current running claim and write-once (a resumed run never
     overwrites the first stamp). Returns True when the row was stamped.
@@ -139,19 +139,38 @@ def save_checkpoint(conn, task_id, *, run_id, data, classification=None, reason=
             block_kind = {"transient": "transient", "budget": "needs_input"}.get(str(classification), "capability")
             summary = machine_block_summary(classification, reason, data, event_id)
             human = human_block_reason(classification, reason, data["owner"])
+            # Talaria row 39: a pause is a block and counts toward the board's block-loop
+            # breaker exactly like ``block_task`` (row 15). Before this, pause -> reconcile ->
+            # respawn -> pause again cycled without limit (t_655563e8: 5 rounds, 2026-09-28);
+            # at ``BLOCK_RECURRENCE_LIMIT`` same-kind pauses the card parks in triage for a human.
+            prev = conn.execute(
+                "SELECT block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            new_status, event_kind, set_sql, params, route_payload = kb._route_block(
+                block_kind, human, source_status,
+                prev_kind=kb._row_get(prev, "block_kind"),
+                prev_recurrences=int(kb._row_get(prev, "block_recurrences") or 0),
+            )
             conn.execute(
-                "UPDATE tasks SET status='blocked', block_kind=?, claim_lock=NULL, "
+                f"UPDATE tasks SET status=?, {set_sql}, claim_lock=NULL, "
                 "claim_expires=NULL, worker_pid=NULL, worker_started_at=NULL, "
-                "last_failure_error=? WHERE id=?", (block_kind, human[:500], task_id),
+                "last_failure_error=? WHERE id=?", (new_status, *params, human[:500], task_id),
             )
             kb._end_run(conn, task_id, outcome="blocked", status="blocked", summary=summary,
                         metadata={"recovery": payload, "checkpoint_event_id": event_id})
-            kb._append_event(conn, task_id, "blocked", {
-                "reason": human, "recovery_summary": summary, "kind": block_kind,
+            kb._append_event(conn, task_id, event_kind, {
+                **route_payload, "recovery_summary": summary,
                 "classification": classification, "owner": data["owner"],
-                "next_command": data["next_command"],
-                "checkpoint_event_id": event_id, "source_status": source_status,
+                "next_command": data["next_command"], "checkpoint_event_id": event_id,
             }, run_id=run_id)
+            if event_kind == "block_loop_detected":
+                kb.add_comment(
+                    conn, task_id, "loop-breaker",
+                    f"LOOP BREAKER | parked in triage after {route_payload.get('recurrences')} recovery pauses "
+                    f"of the same kind (kind={block_kind}, classification={classification}). Reconciling and "
+                    "resuming did not get past this gate; a human decides whether to approve the step, do it "
+                    "by hand, or drop it, then comments here to release the card. Last reason: "
+                    + str(reason or "").strip()[:400],
+                )
         return {"event_id": event_id, "run_id": run_id, **payload}
 
 

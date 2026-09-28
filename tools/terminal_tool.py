@@ -871,8 +871,11 @@ def _run_approval_guards(command: str, env_type: str, config: Dict[str, Any], *,
             f"Command denied: {desc}. "
             "Use the approval prompt to allow it, or rephrase the command."
         )
-        raise _Rejected(_error_json(approval.get("message", fallback_msg), status="blocked",
-                                    **({"user_summary": approval["user_summary"]} if approval.get("user_summary") else {})))
+        # Talaria row 39: a dangerous-pattern gate carries its ``pattern_key`` so a headless
+        # kanban worker can tell a consent gate (operator may approve) from a scanner or deny-rule
+        # verdict (no approval path exists; the worker must rephrase).
+        extras = {k: approval[k] for k in ("user_summary", "pattern_key", "description") if approval.get(k)}
+        raise _Rejected(_error_json(approval.get("message", fallback_msg), status="blocked", **extras))
     desc = approval.get("description", "flagged as dangerous")
     if approval.get("user_approved"):
         return _ApprovalVerdict(

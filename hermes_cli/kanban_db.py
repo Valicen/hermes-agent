@@ -786,10 +786,12 @@ class Run:
     summary: Optional[str]
     metadata: Optional[dict]
     error: Optional[str]
+    session_id: Optional[str] = None  # Talaria row 39: worker transcript id (profile state.db)
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Run":
         return cls(
+            session_id=_lossy_text(row["session_id"]) if "session_id" in row.keys() else None,
             **{
                 col: _lossy_text(row[col]) for col in (
                     "task_id", "profile", "step_key", "status", "claim_lock", "claim_expires",

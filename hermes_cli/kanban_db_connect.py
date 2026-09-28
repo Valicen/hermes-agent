@@ -838,6 +838,9 @@ _TASK_RUN_COLUMNS = (
     # Spawn-time start fingerprint of the run's worker_pid (PID-reuse guard for the
     # terminal-worker reaper; NULL = legacy row, never signalled).
     ("worker_started_at", "worker_started_at INTEGER"),
+    # Talaria row 39: the worker's own Hermes session id (profile state.db, source=kanban),
+    # stamped by the worker on its first iteration so surfaces can open the run's transcript.
+    ("session_id", "session_id TEXT"),
 )
 
 
@@ -1017,7 +1020,7 @@ _REBUILD_SPECS = {
         " worker_pid INTEGER, worker_started_at INTEGER, max_runtime_seconds INTEGER,"
         " last_heartbeat_at INTEGER, started_at INTEGER NOT NULL,"
         " ended_at INTEGER, outcome TEXT, summary TEXT, metadata TEXT,"
-        " error TEXT)",
+        " error TEXT, session_id TEXT)",
         (
             "CREATE INDEX idx_runs_task ON task_runs(task_id, started_at)",
             "CREATE INDEX idx_runs_status ON task_runs(status)",

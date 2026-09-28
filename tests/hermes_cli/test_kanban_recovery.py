@@ -109,7 +109,8 @@ def test_denial_after_checkpoint_uses_real_gate_and_preserves_progress(worker):
     messages = [{"role": "assistant", "tool_calls": [{"id": "deny", "function": {
         "name": "terminal", "arguments": json.dumps({"command": command})}}]},
         {"role": "tool", "tool_call_id": "deny", "content": json.dumps({
-            "status": "blocked", "exit_code": -1, "error": result["message"]})}]
+            "status": "blocked", "exit_code": -1, "error": result["message"],
+            "pattern_key": result["pattern_key"]})}]
     assert before_iteration(SimpleNamespace(), messages)
     cp = latest_checkpoint(conn, tid)
     assert cp["checkpoint"]["commits"] == ["fixture-commit"]
@@ -283,3 +284,56 @@ def test_pause_writes_a_human_reason_and_keeps_the_machine_record(worker):
     assert checkpoint_after_worker_loss(conn, tid, "worker_death", "no heartbeat for 10 minutes", notify=True)
     assert kb.get_task(conn, tid).last_failure_error == (
         "Paused because the worker died: no heartbeat for 10 minutes. Progress is saved; nothing was lost. Owner: operator.")
+
+
+# --- Talaria row 39 ---------------------------------------------------------------------------
+
+def test_worker_session_is_stamped_once_on_first_iteration(worker, monkeypatch):
+    from hermes_cli.kanban_recovery import stamp_worker_session
+    conn, tid, rid = worker
+    monkeypatch.setenv("HERMES_SESSION_ID", "20260928_000000_fixture")
+    agent = SimpleNamespace(session_id="20260928_000000_agent")
+    assert not before_iteration(agent, [])
+    run = next(r for r in kb.list_runs(conn, tid) if r.id == rid)
+    assert run.session_id == "20260928_000000_agent"
+    # write-once, fenced: a later stamp (or a foreign run id) never overwrites it
+    assert not stamp_worker_session(conn, tid, rid, "other")
+    assert not stamp_worker_session(conn, tid, rid + 1, "other")
+    assert next(r for r in kb.list_runs(conn, tid) if r.id == rid).session_id == "20260928_000000_agent"
+    # the model-facing show and the dashboard-facing dataclass both expose it
+    shown = json.loads(registry.dispatch("kanban_show", {}))
+    assert shown["runs"][-1]["session_id"] == "20260928_000000_agent"
+
+
+def test_scanner_denial_without_pattern_key_does_not_pause(worker):
+    conn, tid, rid = worker
+    messages = [{"role": "assistant", "tool_calls": [{"id": "scan", "function": {
+        "name": "terminal", "arguments": json.dumps({"command": "node -e 'fixture'"})}}]},
+        {"role": "tool", "tool_call_id": "scan", "content": json.dumps({
+            "status": "blocked", "exit_code": -1,
+            "error": "BLOCKED: Security scan — [HIGH] Inline interpreter with suspicious payload"})}]
+    assert not before_iteration(SimpleNamespace(), messages)
+    assert kb.get_task(conn, tid).status == "running"
+    assert latest_checkpoint(conn, tid) is None or not latest_checkpoint(conn, tid)["requires_reconciliation"]
+
+
+def test_repeated_same_kind_pause_parks_in_triage_via_loop_breaker(worker):
+    conn, tid, rid = worker
+    first = save_checkpoint(conn, tid, run_id=rid, data=data(), classification="policy",
+                            reason="systemctl stop denied", pause=True)
+    task = kb.get_task(conn, tid)
+    assert task.status == "blocked" and task.block_kind == "capability" and task.block_recurrences == 1
+    assert kb.unblock_task(conn, tid, recovery=reconcile(first))
+    kb.claim_task(conn, tid)
+    rid2 = kb.get_task(conn, tid).current_run_id
+    second = save_checkpoint(conn, tid, run_id=rid2, data=data(), classification="operator_only",
+                             reason="lifecycle readiness unknown", pause=True)
+    assert second is not None
+    task = kb.get_task(conn, tid)
+    assert task.status == "triage" and task.block_recurrences == kb.BLOCK_RECURRENCE_LIMIT
+    kinds = [e.kind for e in kb.list_events(conn, tid)]
+    assert "block_loop_detected" in kinds and "blocked" not in kinds[kinds.index("block_loop_detected"):]
+    comments = kb.list_comments(conn, tid)
+    assert comments[-1].author == "loop-breaker" and "recovery pauses" in comments[-1].body
+    # a different kind after the loop restarts the count, as for block_task
+    assert kb.get_task(conn, tid).current_run_id is None
