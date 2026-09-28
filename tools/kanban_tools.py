@@ -334,7 +334,7 @@ _TASK_FIELDS = tuple(
 _TASK_SUMMARY_FIELDS = tuple(
     "id title assignee status priority tenant workspace_kind workspace_path project_id created_by "
     "created_at started_at completed_at current_run_id model_override provider_override".split())
-_RUN_FIELDS = tuple("id profile status outcome summary error metadata started_at ended_at".split())
+_RUN_FIELDS = tuple("id profile status outcome summary error metadata started_at ended_at session_id".split())
 _COMMENT_FIELDS = ("author", "body", "created_at")
 _EVENT_FIELDS = ("kind", "payload", "created_at", "run_id")
 _ATTACHMENT_FIELDS = tuple(
@@ -1029,7 +1029,10 @@ def _handle_checkpoint(args: dict, **kw) -> str:
     pause = _parse_bool_arg(args, "pause")
     if args.get("operations") is not None:
         data["preflight"] = inspect_operations(args["operations"])
-        classification, reason, pause = "operator_only", "Scoped lifecycle readiness is unknown; normal approval-capable operator handoff required before long execution", True
+        # Human sentence: it becomes the board's block reason (Talaria row 38).
+        classification, reason, pause = "operator_only", (
+            "the next step is a deployment or service change that an operator has to run "
+            "or approve; the worker cannot verify on its own that it is safe to run"), True
     with _board(args.get("board")) as (kb, conn):
         receipt = save_checkpoint(conn, tid, run_id=run_id, data=data,
                                   classification=classification, reason=reason, pause=pause)

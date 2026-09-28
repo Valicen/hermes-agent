@@ -245,3 +245,41 @@ def test_task_runtime_warning_does_not_require_agent_runtime_configuration(worke
     assert not before_iteration(SimpleNamespace(), [])
     assert len([e for e in kb.list_events(conn, tid) if e.kind == "checkpoint_attention"]) == 1
     assert kb.get_task(conn, tid).status == "running"
+
+
+# Talaria row 38 (2026-09-28): the board shows one human sentence; the machine
+# record (classification, owner, checkpoint id, next command) stays on the run
+# summary and the event payload. David read the row-37 summary string as the
+# block reason and could not tell why the card was blocked.
+def test_pause_writes_a_human_reason_and_keeps_the_machine_record(worker):
+    from hermes_cli.kanban_recovery import checkpoint_after_worker_loss, human_block_reason
+    conn, tid, rid = worker
+    out = save_checkpoint(conn, tid, run_id=rid, data=data(), classification="operator_only",
+                          reason="the deploy step needs an operator to run it", pause=True)
+    task = kb.get_task(conn, tid)
+    assert task.last_failure_error == (
+        "Paused for an operator's approval: the deploy step needs an operator to run it. "
+        "Progress is saved; nothing was lost. Owner: operator.")
+    assert "next=" not in task.last_failure_error and "operator_only:" not in task.last_failure_error
+    blocked = [e for e in kb.list_events(conn, tid) if e.kind == "blocked"][-1]
+    payload = json.loads(blocked.payload) if isinstance(blocked.payload, str) else blocked.payload
+    assert payload["reason"] == task.last_failure_error
+    assert payload["next_command"] == "inspect fixture postconditions" and payload["owner"] == "operator"
+    assert payload["recovery_summary"].startswith(f"operator_only: owner=operator; progress saved in checkpoint {out['event_id']};")
+    run = kb.latest_run(conn, tid)
+    assert run.summary == payload["recovery_summary"]
+    # Every class reads as a sentence, never as a classifier token.
+    for cls in ("auth", "policy", "transient", "budget", "worker_death", "operator_only"):
+        text = human_block_reason(cls, "fixture reason.")
+        assert text.startswith("Paused") and text.endswith("Progress is saved; nothing was lost.")
+        assert human_block_reason(cls, "fixture reason.", "unknown") == text
+        assert f"{cls}:" not in text
+    assert human_block_reason("auth", "") == "Paused for missing access or credentials. Progress is saved; nothing was lost."
+    # Dispatcher-side worker loss: same sentence shape on the task row.
+    assert kb.unblock_task(conn, tid, recovery=reconcile(out))
+    kb.claim_task(conn, tid)
+    new_rid = kb.get_task(conn, tid).current_run_id
+    save_checkpoint(conn, tid, run_id=new_rid, data=data())
+    assert checkpoint_after_worker_loss(conn, tid, "worker_death", "no heartbeat for 10 minutes", notify=True)
+    assert kb.get_task(conn, tid).last_failure_error == (
+        "Paused because the worker died: no heartbeat for 10 minutes. Progress is saved; nothing was lost. Owner: operator.")

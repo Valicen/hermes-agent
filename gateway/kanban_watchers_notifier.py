@@ -506,7 +506,9 @@ def _fmt_timed_out(ev, n) -> tuple:
 # never wake the creator.
 _EVENT_FORMATTERS: dict[str, Callable[[Any, "_KanbanNotification"], tuple]] = {
     "completed": _fmt_completed,
-    "blocked": lambda ev, n: (f"⏸ {n.head} blocked{_clip(ev, 'reason', ': {}', 160)}", None, None),
+    # Talaria row 38: the reason is one human sentence; a recovery pause also
+    # carries the worker's saved next step, which the operator ping still needs.
+    "blocked": lambda ev, n: (f"⏸ {n.head} blocked{_clip(ev, 'reason', ': {}', 200)}{_clip(ev, 'next_command', ' Next step: {}', 120)}", None, None),
     "gave_up": _fmt_gave_up,
     "crashed": lambda ev, n: (
         f"✖ {n.head} — its worker stopped unexpectedly; " +

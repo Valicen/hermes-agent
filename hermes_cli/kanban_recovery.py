@@ -14,6 +14,61 @@ CLASSES = frozenset({"operator_only", "auth", "policy", "transient", "budget", "
 FIELDS = ("commits", "dirty_files", "evidence", "current_runtime", "intended_runtime",
           "detached_operations", "next_command", "rollback", "blockers", "owner")
 
+# What the board (and the Argus attention row) shows for a paused run. The machine
+# record -- classification, owner, checkpoint id, next command -- stays on the run
+# summary and the event payload; the human-facing reason is one sentence. Talaria
+# row 38 (2026-09-28): the row-37 summary string ("operator_only: owner=...;
+# progress saved in checkpoint N; ...; next=systemd-run ...") was what David read
+# as the block reason -- "vomiting logs of a problem into my lap".
+_HUMAN_LEAD = {
+    "operator_only": "Paused for an operator's approval",
+    "auth": "Paused for missing access or credentials",
+    "policy": "Paused because a command was denied",
+    "transient": "Paused after a temporary failure",
+    "budget": "Paused because the run's budget ran out",
+    "worker_death": "Paused because the worker died",
+}
+
+
+def human_block_reason(classification, reason, owner=None):
+    """One plain sentence for the board: the lead names the class, the reason says what.
+
+    ``owner`` (the checkpoint's named operator) is appended when it is known --
+    the notifier's @worker ping and the board both need to say who reconciles.
+    """
+    text = " ".join(str(reason or "").split()).rstrip(". ")
+    lead = _HUMAN_LEAD.get(str(classification), "Paused")
+    body = f"{lead}: {text}." if text else f"{lead}."
+    who = " ".join(str(owner or "").split())
+    suffix = f" Owner: {who}." if who and who.lower() != "unknown" else ""
+    return f"{body} Progress is saved; nothing was lost.{suffix}"
+
+
+def machine_block_summary(classification, reason, data, event_id=None):
+    """The recovery record for the run summary / logs (unchanged row-37 shape)."""
+    saved = f"progress saved in checkpoint {event_id}" if event_id is not None else "progress saved"
+    return (f"{classification}: owner={data['owner']}; {saved}; "
+            f"{reason}; next={data['next_command']}; "
+            "reconcile live runtime and detached actions before resuming")
+
+
+def stamp_worker_session(conn, task_id, run_id, session_id):
+    """Talaria row 38: record the worker's own Hermes session id on its open run.
+
+    Fenced to the current running claim and write-once (a resumed run never
+    overwrites the first stamp). Returns True when the row was stamped.
+    """
+    if not session_id or run_id is None:
+        return False
+    with kb.write_txn(conn):
+        cur = conn.execute(
+            "UPDATE task_runs SET session_id = ? WHERE id = ? AND session_id IS NULL AND ended_at IS NULL "
+            "AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = task_runs.task_id AND t.id = ? "
+            "AND t.status = 'running' AND t.current_run_id = task_runs.id)",
+            (str(session_id), int(run_id), task_id),
+        )
+        return cur.rowcount == 1
+
 
 def latest_checkpoint(conn, task_id):
     row = conn.execute(
@@ -82,18 +137,19 @@ def save_checkpoint(conn, task_id, *, run_id, data, classification=None, reason=
         if pause:
             source_status = kb._retry_status_for_run(conn, task_id)
             block_kind = {"transient": "transient", "budget": "needs_input"}.get(str(classification), "capability")
-            summary = (f"{classification}: owner={data['owner']}; progress saved in checkpoint {event_id}; "
-                       f"{reason}; next={data['next_command']}; "
-                       "reconcile live runtime and detached actions before resuming")
+            summary = machine_block_summary(classification, reason, data, event_id)
+            human = human_block_reason(classification, reason, data["owner"])
             conn.execute(
                 "UPDATE tasks SET status='blocked', block_kind=?, claim_lock=NULL, "
                 "claim_expires=NULL, worker_pid=NULL, worker_started_at=NULL, "
-                "last_failure_error=? WHERE id=?", (block_kind, summary[:500], task_id),
+                "last_failure_error=? WHERE id=?", (block_kind, human[:500], task_id),
             )
             kb._end_run(conn, task_id, outcome="blocked", status="blocked", summary=summary,
                         metadata={"recovery": payload, "checkpoint_event_id": event_id})
             kb._append_event(conn, task_id, "blocked", {
-                "reason": summary, "kind": block_kind, "classification": classification,
+                "reason": human, "recovery_summary": summary, "kind": block_kind,
+                "classification": classification, "owner": data["owner"],
+                "next_command": data["next_command"],
                 "checkpoint_event_id": event_id, "source_status": source_status,
             }, run_id=run_id)
         return {"event_id": event_id, "run_id": run_id, **payload}
@@ -113,13 +169,15 @@ def checkpoint_after_worker_loss(conn, task_id, classification, reason, *, notif
                "requires_reconciliation": True}
     kb._append_event(conn, task_id, "checkpoint_saved", payload, run_id=previous["run_id"])
     conn.execute("UPDATE tasks SET block_kind='capability', last_failure_error=? WHERE id=?",
-                 (f"{classification}: {reason}; progress saved; owner={data['owner']}; reconcile detached operations", task_id))
+                 (human_block_reason(classification, reason, data["owner"])[:500], task_id))
     if notify:
         # Reclaim events are not an attention lane. Use one existing blocked event;
         # callers hold the ownership-fenced transaction and leave running atomically.
         kb._append_event(conn, task_id, "blocked", {
-            "reason": f"{reason}; progress saved; owner={data['owner']}; next={data['next_command']}; reconcile runtime and detached actions",
-            "kind": "capability", "classification": classification,
+            "reason": human_block_reason(classification, reason, data["owner"]),
+            "recovery_summary": machine_block_summary(classification, reason, data),
+            "kind": "capability", "classification": classification, "owner": data["owner"],
+            "next_command": data["next_command"],
             "source_status": kb._retry_status_for_run(conn, task_id),
         }, run_id=previous["run_id"])
     return True

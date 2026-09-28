@@ -27,7 +27,8 @@ def test_recovery_notification_retries_wake_without_duplicate_ping(tmp_path, mon
     runner = _make_runner(failing)
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     assert len(failing.sent) == 1 and len(failing.handled) == 1
-    assert "policy" in failing.sent[0]["text"]
+    # Talaria row 38: the ping carries the human sentence, not the classifier token.
+    assert "a command was denied" in failing.sent[0]["text"]
     runner._running = True
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     assert len(failing.sent) == 1 and len(failing.handled) == 2
