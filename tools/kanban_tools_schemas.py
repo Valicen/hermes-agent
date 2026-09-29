@@ -272,14 +272,14 @@ KANBAN_REQUEST_CHANGES_SCHEMA = _schema(
 
 KANBAN_CHECKPOINT_SCHEMA = _schema(
     "kanban_checkpoint",
-    "Save a run-fenced recovery checkpoint before long work or when blocked. Optional operations performs a non-executing lifecycle preflight in THIS worker context and pauses for an operator handoff: readiness unknown is not permission. Never include secrets. A checkpoint is not completion.",
+    "Save a run-fenced recovery checkpoint before long work or when blocked. Optional operations performs a non-executing lifecycle preflight in THIS worker context; it pauses for an operator handoff only when a flagged command is NOT pre-approved by the profile command_allowlist (row 43) — pre-approved commands come back readiness=pre-approved and you run them yourself: readiness unknown is not permission. Never include secrets. A checkpoint is not completion.",
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "checkpoint": _prop("object", "Required fields: commits, dirty_files, evidence, detached_operations, blockers (lists); current_runtime, intended_runtime, next_command, rollback, owner (nonblank text). Mark unknown explicitly."),
         "operations": {"type": "array", "items": {"type": "object"}, "description": "Before long lifecycle work: exact command, environment, action, authorization_provenance; units, required_capabilities, dependencies lists. Never executes input or grants approval. Always hands off unknown readiness before deployment."},
         "classification": {"type": "string", "enum": ["operator_only", "auth", "policy", "transient", "budget", "worker_death"]},
         "reason": _prop("string", "Actionable blocker or progress note."),
-        "pause": _prop("boolean", "Pause with durable handoff; requires classification and reason. Operations always pauses."),
+        "pause": _prop("boolean", "Pause with durable handoff; requires classification and reason. Operations pauses only when a flagged command is not pre-approved by the profile command_allowlist (Talaria row 43); pre-approved operations come back readiness=pre-approved — run them here."),
     },
     ["checkpoint"],
 )

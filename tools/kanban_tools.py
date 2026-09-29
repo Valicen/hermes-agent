@@ -1112,10 +1112,18 @@ def _handle_checkpoint(args: dict, **kw) -> str:
     pause = _parse_bool_arg(args, "pause")
     if args.get("operations") is not None:
         data["preflight"] = inspect_operations(args["operations"])
-        # Human sentence: it becomes the board's block reason (Talaria row 38).
-        classification, reason, pause = "operator_only", (
-            "the next step is a deployment or service change that an operator has to run "
-            "or approve; the worker cannot verify on its own that it is safe to run"), True
+        # Talaria row 43 (2026-09-29): pause for an operator only when a flagged command is
+        # NOT pre-approved by the profile's command_allowlist (or is deny-listed). Allowlisted
+        # lifecycle work (DEV/QA tiers) continues in this worker — the whole point of the
+        # allowlist was to stop cards parking on David for permitted commands.
+        needs_operator = any(r.get("flagged") and not r.get("permission_granted") for r in data["preflight"])
+        if needs_operator:
+            # Human sentence: it becomes the board's block reason (Talaria row 38).
+            classification, reason, pause = "operator_only", (
+                "the next step is a deployment or service change that an operator has to run "
+                "or approve; the worker cannot verify on its own that it is safe to run"), True
+        elif pause and not classification:
+            pause = False
     with _board(args.get("board")) as (kb, conn):
         receipt = save_checkpoint(conn, tid, run_id=run_id, data=data,
                                   classification=classification, reason=reason, pause=pause)
